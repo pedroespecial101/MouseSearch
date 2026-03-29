@@ -47,3 +47,21 @@ services:
     volumes:
       - /opt/appdata/mousesearch/data:/data
     restart: unless-stopped
+
+  mousesearch-mcp:
+    profiles: ["mcp"]
+    build:
+      context: /home/ubuntu/projects/MouseSearch
+    container_name: mousesearch-mcp
+    network_mode: service:ts-mousesearch
+    depends_on:
+      - ts-mousesearch
+      - mousesearch
+    environment:
+      TZ: ${TZ:-Europe/London}
+      MOUSESEARCH_API_BASE_URL: ${MOUSESEARCH_API_BASE_URL:-http://127.0.0.1:5000/api/v1}
+      MOUSESEARCH_API_TOKEN: ${MOUSESEARCH_API_TOKEN:-}
+      MOUSESEARCH_MCP_HOST: 0.0.0.0
+      MOUSESEARCH_MCP_PORT: ${MOUSESEARCH_MCP_PORT:-8765}
+    command: ["python", "mcp_server.py"]
+    restart: unless-stopped

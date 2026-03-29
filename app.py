@@ -1924,6 +1924,7 @@ def build_author_initials_variant(query: str) -> str | None:
     return variant
 
 # --- QUART ROUTES ---
+@app.route('/api/v1/mam/autosuggest', methods=['GET'])
 @app.route('/mam/autosuggest', methods=['GET'])
 async def mam_autosuggest():
     def autosuggest_response(payload, cache_status="miss"):
@@ -2194,6 +2195,7 @@ async def mam_autosuggest():
         return autosuggest_response([])
     
     
+@app.route('/api/v1/mam/status', methods=['GET'])
 @app.route('/mam/status', methods=['GET'])
 async def mam_status(): 
     result = await fetch_mam_json_load_result()
@@ -2206,6 +2208,7 @@ async def mam_status():
         'message': result["message"] or 'Not logged into MAM or failed to fetch data',
     }), status_code
 
+@app.route('/api/v1/mam/user_data', methods=['GET'])
 @app.route('/mam/user_data', methods=['GET'])
 async def mam_user_data():
     result = await fetch_mam_json_load_result()
@@ -2682,6 +2685,7 @@ async def fetch_torrent_file_from_mam(torrent_url: str) -> tuple[bytes | None, s
         return None, None
     
 # --- GENERIC TORRENT CLIENT ROUTES ---
+@app.route('/api/v1/client/status', methods=['GET'])
 @app.route('/client/status', methods=['GET'])
 async def client_status():
     if not torrent_client: return jsonify({"status": "error", "message": "Client not initialized"}), 500
@@ -2705,6 +2709,7 @@ async def client_status():
                 "display_name": getattr(torrent_client, "display_name", "Torrent Client"),
             }), 502
 
+@app.route('/api/v1/client/categories', methods=['GET'])
 @app.route('/client/categories', methods=['GET'])
 async def client_categories():
     if not torrent_client: return jsonify({'error': 'Not connected'}), 401
@@ -2716,6 +2721,7 @@ async def client_categories():
         categories = await torrent_client.get_categories()
     return jsonify(categories) if categories else (jsonify({'error': 'Failed'}), 500)
 
+@app.route('/api/v1/client/add', methods=['POST'])
 @app.route('/client/add', methods=['POST'])
 async def client_add_torrent():
     """
@@ -2737,7 +2743,7 @@ async def client_add_torrent():
         return jsonify({'error': 'Client not initialized'}), 500
     
     await torrent_client.login()
-    incoming_data = await request.get_json()
+    incoming_data = await request.get_json(silent=True) or {}
     
     # --- NEW: Extract custom path ---
     custom_relative_path = incoming_data.get('custom_relative_path')
@@ -2961,13 +2967,14 @@ async def client_add_torrent():
     else:
         return jsonify({'error': result.get('message', 'Unknown error')}), 400
 
+@app.route('/api/v1/client/resolve_mid', methods=['POST'])
 @app.route('/client/resolve_mid', methods=['POST'])
 async def client_resolve_mid():
     """Resolve a MID (MyAnonamouse ID) to a torrent hash by querying the client."""
     if not torrent_client:
         return jsonify({'error': 'Client not initialized'}), 500
     
-    data = await request.get_json()
+    data = await request.get_json(silent=True) or {}
     mid = data.get('mid')
     
     if not mid:
@@ -3002,6 +3009,7 @@ async def client_resolve_mid():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/v1/client/info/<hash_val>', methods=['GET'])
 @app.route('/client/info/<hash_val>', methods=['GET'])
 async def client_torrent_info(hash_val):
     if hash_val in torrent_status_cache:
@@ -3023,9 +3031,10 @@ async def client_torrent_info(hash_val):
         return jsonify(info)
     return jsonify({'error': 'Not found'}), 404
 
+@app.route('/api/v1/client/info/batch', methods=['POST'])
 @app.route('/client/info/batch', methods=['POST'])
 async def client_torrent_info_batch():
-    data = await request.get_json()
+    data = await request.get_json(silent=True) or {}
     hash_list = data.get('hashes', [])
     if not hash_list: return jsonify({'torrents': []})
     
@@ -3104,6 +3113,8 @@ def parse_series_info(series_info_str):
     """Parse series_info from JSON string to object. Returns {} if empty or invalid."""
     if not series_info_str:
         return {}
+    if isinstance(series_info_str, dict):
+        return series_info_str
     try:
         return json.loads(series_info_str)
     except (json.JSONDecodeError, TypeError):
@@ -3184,33 +3195,169 @@ def format_mam_search_error(exc: Exception) -> str:
         return f"MAM search failed: {detail}"
     return "MAM search failed due to an unexpected error."
 
-@app.route('/mam/search', methods=['GET'])
-async def mam_search():
-    if not await login_mam(): 
-        return await render_template(
-            "partials/results.html",
-            error_message="Login failed",
-            RESULTS_DISPLAY_FIELDS=app.config.get(
-                "RESULTS_DISPLAY_FIELDS",
-                FALLBACK_CONFIG["RESULTS_DISPLAY_FIELDS"]
-            ),
-        )
-    query = request.args.get("query", "").strip()
-    search_started_at = time.monotonic()
+def mam_search_status_code_for_exception(exc: Exception) -> int:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code if exc.response is not None else 502
+    if isinstance(exc, httpx.RequestError):
+        return 502
+    return 500
 
-    # Used by templates to decide whether VIP Freeleech applies (fl_vip).
-    is_vip_active = False
+
+def get_nonempty_request_list(args, name):
+    return [v for v in args.getlist(name) if v]
+
+
+def search_checkbox_state(args, name, default_search_fields, has_search_param):
+    val = args.get(name)
+    if val is None:
+        return default_search_fields.get(name, False) if not has_search_param else False
+    return str(val).strip().lower() in ("true", "on", "1", "yes")
+
+
+async def get_vip_active_status() -> bool:
     try:
         user_data = await fetch_mam_json_load()
         vip_until = (user_data or {}).get('vip_until')
         if vip_until:
             vip_dt = datetime.fromisoformat(str(vip_until).strip().replace(' ', 'T'))
-            is_vip_active = vip_dt > datetime.utcnow()
+            return vip_dt > datetime.utcnow()
     except Exception:
-        is_vip_active = False
+        return False
+    return False
 
-    def get_nonempty_list(name):
-        return [v for v in request.args.getlist(name) if v]
+
+async def get_search_client_context():
+    client_status_data = {"status": "error", "message": "Client not initialized"}
+    client_connected = False
+    categories = {}
+    mid_to_hash = {}
+
+    if not torrent_client:
+        return {
+            "status": client_status_data,
+            "connected": client_connected,
+            "categories": categories,
+            "mid_to_hash": mid_to_hash,
+        }
+
+    try:
+        client_status_data = await torrent_client.get_status()
+    except Exception as exc:
+        app.logger.warning(f"[SEARCH] Client status probe failed: {exc}")
+        try:
+            await torrent_client.login()
+            client_status_data = await torrent_client.get_status()
+        except Exception as retry_exc:
+            app.logger.warning(f"[SEARCH] Client status retry failed: {retry_exc}")
+            client_status_data = {
+                "status": "error",
+                "message": f"Client status failed: {retry_exc}",
+            }
+
+    client_connected = client_status_data.get("status") == "success"
+    if not client_connected:
+        return {
+            "status": client_status_data,
+            "connected": client_connected,
+            "categories": categories,
+            "mid_to_hash": mid_to_hash,
+        }
+
+    try:
+        categories = await torrent_client.get_categories()
+    except Exception as exc:
+        app.logger.warning(f"[SEARCH] Failed to fetch categories: {exc}")
+
+    try:
+        all_torrents = await torrent_client.get_torrents_with_metadata()
+        for torrent in all_torrents:
+            comment = torrent.get('comment', '')
+            if comment:
+                mid_match = re.search(r'MID=(\d+)', comment)
+                if mid_match:
+                    mid = mid_match.group(1)
+                    torrent_hash = torrent.get('hash', '')
+                    if torrent_hash:
+                        mid_to_hash[mid] = torrent_hash
+    except Exception as exc:
+        app.logger.warning(f"[SEARCH] Failed to fetch torrents with metadata: {exc}")
+
+    return {
+        "status": client_status_data,
+        "connected": client_connected,
+        "categories": categories,
+        "mid_to_hash": mid_to_hash,
+    }
+
+
+def decorate_search_results(ranked_results, base_dl_url):
+    for item in ranked_results:
+        if dl_hash := item.get('dl'):
+            item['download_link'] = base_dl_url + dl_hash
+        else:
+            item['download_link'] = ''
+
+        if not item.get('thumbnail'):
+            if item.get('id'):
+                item['thumbnail'] = f"https://cdn.myanonamouse.net/t/p/small/{item['id']}.webp"
+            else:
+                cat = item.get('category', '')
+                item['thumbnail'] = f"https://static.myanonamouse.net/pic/cats/3/{cat}.png"
+
+        item['author_info'] = parse_mam_metadata(item.get('author_info', ''))
+        item['narrator_info'] = parse_mam_metadata(item.get('narrator_info', ''))
+        item['series_display'] = parse_mam_metadata(item.get('series_info', ''), is_series=True)
+
+        language_id = str(item.get("language", "")).strip()
+        language_name = LANGUAGE_BY_ID.get(language_id)
+        if not language_name:
+            language_name = item.get("lang_code") or item.get("language") or "Unknown"
+        item["language_name"] = language_name
+
+
+def mark_downloaded_results(results, mid_to_hash):
+    for item in results:
+        item_id = str(item.get('id', ''))
+        if item_id in mid_to_hash:
+            item['my_snatched'] = 1
+
+    metadata = load_database()
+    metadata_updated = False
+    for item in results:
+        if item.get('my_snatched') != 1:
+            continue
+        item_id = str(item.get('id', ''))
+        torrent_hash = mid_to_hash.get(item_id)
+        if torrent_hash and torrent_hash not in metadata:
+            metadata[torrent_hash] = {
+                "mid": item_id,
+                "author": item.get('author_info', ''),
+                "title": item.get('title', ''),
+                "added_on": datetime.now().isoformat(),
+                "status": "unknown",
+                "retry_count": 0,
+                "series_info": item.get('series_display', ''),
+                "category": get_category_name(item.get('main_cat', '')),
+                "download_link": item.get('download_link', '')
+            }
+            metadata_updated = True
+
+    if metadata_updated:
+        save_database(metadata)
+
+
+async def execute_mam_search(args):
+    if not await login_mam():
+        return {
+            "ok": False,
+            "status_code": 401,
+            "error_message": "Login failed",
+            "results": [],
+        }
+
+    query = str(args.get("query", "") or "").strip()
+    search_started_at = time.monotonic()
+    is_vip_active = await get_vip_active_status()
 
     search_field_names = [
         "search_in_title",
@@ -3221,7 +3368,7 @@ async def mam_search():
         "search_in_tags",
         "search_in_filenames",
     ]
-    has_search_param = any(request.args.get(name) is not None for name in search_field_names)
+    has_search_param = any(args.get(name) is not None for name in search_field_names)
     default_search_fields = {
         "search_in_title": True,
         "search_in_author": True,
@@ -3232,26 +3379,20 @@ async def mam_search():
         "search_in_filenames": False,
     }
 
-    def checkbox_state(name):
-        val = request.args.get(name)
-        if val is None:
-            return default_search_fields.get(name, False) if not has_search_param else False
-        return val in ("true", "on", "1", "yes")
-
-    title_on = checkbox_state("search_in_title")
-    author_on = checkbox_state("search_in_author")
-    series_on = checkbox_state("search_in_series")
-    narrator_on = checkbox_state("search_in_narrator")
-    description_on = checkbox_state("search_in_description")
-    tags_on = checkbox_state("search_in_tags")
-    filenames_on = checkbox_state("search_in_filenames")
-    hide_downloaded = checkbox_state("hide_downloaded")
+    title_on = search_checkbox_state(args, "search_in_title", default_search_fields, has_search_param)
+    author_on = search_checkbox_state(args, "search_in_author", default_search_fields, has_search_param)
+    series_on = search_checkbox_state(args, "search_in_series", default_search_fields, has_search_param)
+    narrator_on = search_checkbox_state(args, "search_in_narrator", default_search_fields, has_search_param)
+    description_on = search_checkbox_state(args, "search_in_description", default_search_fields, has_search_param)
+    tags_on = search_checkbox_state(args, "search_in_tags", default_search_fields, has_search_param)
+    filenames_on = search_checkbox_state(args, "search_in_filenames", default_search_fields, has_search_param)
+    hide_downloaded = search_checkbox_state(args, "hide_downloaded", {"hide_downloaded": False}, False)
     if author_on and not title_on:
         title_on = True
 
-    lang_ids = get_nonempty_list("language_ids") or get_nonempty_list("language_ids[]")
+    lang_ids = get_nonempty_request_list(args, "language_ids") or get_nonempty_request_list(args, "language_ids[]")
     if not lang_ids:
-        lang_value = request.args.get("language", "English")
+        lang_value = str(args.get("language", "English") or "English")
         if lang_value.isdigit():
             lang_ids = [lang_value]
         else:
@@ -3263,17 +3404,24 @@ async def mam_search():
         "thumbnail": "true",
         "dlLink": "true",
         "tor[browse_lang][]": lang_ids,
-        "tor[searchType]": request.args.get("searchType", "all"),
-        "isbn": "true", "description": "true", "mediaInfo": "true"
+        "tor[searchType]": args.get("searchType", "all"),
+        "isbn": "true",
+        "description": "true",
+        "mediaInfo": "true",
     }
     srch_in_fields = {
-        "title": title_on, "author": author_on, "narrator": narrator_on,
-        "series": series_on, "description": description_on,
-        "tags": tags_on, "filenames": filenames_on,
+        "title": title_on,
+        "author": author_on,
+        "narrator": narrator_on,
+        "series": series_on,
+        "description": description_on,
+        "tags": tags_on,
+        "filenames": filenames_on,
     }
     for field, enabled in srch_in_fields.items():
         if enabled:
             params[f"tor[srchIn][{field}]"] = "true"
+
     if query:
         search_text = query
         if author_on:
@@ -3283,34 +3431,42 @@ async def mam_search():
                 if quoted_variant:
                     search_text = f"({query} | \"{quoted_variant}\")"
         params["tor[text]"] = search_text
-    main_cats = [m for m in request.args.getlist("main_cat") if m]
+
+    main_cats = [m for m in args.getlist("main_cat") if m]
     if not main_cats:
-        main_cats = [m for m in request.args.getlist("media_type") if m]
+        main_cats = [m for m in args.getlist("media_type") if m]
     if main_cats and "all" not in main_cats:
         params["tor[main_cat][]"] = list(dict.fromkeys(main_cats))
 
-    if search_scope := request.args.get("search_scope"):
+    if search_scope := args.get("search_scope"):
         params["tor[searchIn]"] = search_scope
 
-    if category_ids := get_nonempty_list("category_ids") or get_nonempty_list("category_ids[]"):
+    if category_ids := get_nonempty_request_list(args, "category_ids") or get_nonempty_request_list(args, "category_ids[]"):
         params["tor[cat][]"] = category_ids
+    else:
+        category_ids = []
 
-    if flag_ids := get_nonempty_list("flag_ids") or get_nonempty_list("flag_ids[]"):
+    if flag_ids := get_nonempty_request_list(args, "flag_ids") or get_nonempty_request_list(args, "flag_ids[]"):
         params["tor[browseFlags][]"] = flag_ids
-        params["tor[browseFlagsHideVsShow]"] = request.args.get("flags_mode", "0")
+        params["tor[browseFlagsHideVsShow]"] = args.get("flags_mode", "0")
+    else:
+        flag_ids = []
 
-    if start_date := request.args.get("start_date"):
+    start_date = str(args.get("start_date", "") or "")
+    end_date = str(args.get("end_date", "") or "")
+    if start_date:
         params["tor[startDate]"] = start_date
-    if end_date := request.args.get("end_date"):
+    if end_date:
         params["tor[endDate]"] = end_date
 
-    min_size = request.args.get("min_size")
-    max_size = request.args.get("max_size")
+    min_size = str(args.get("min_size", "") or "")
+    max_size = str(args.get("max_size", "") or "")
     if min_size:
         params["tor[minSize]"] = min_size
     if max_size:
         params["tor[maxSize]"] = max_size
-    if (min_size or max_size) and (size_unit := request.args.get("size_unit")):
+    size_unit = str(args.get("size_unit", "") or "")
+    if (min_size or max_size) and size_unit:
         params["tor[unit]"] = size_unit
 
     stat_mappings = {
@@ -3321,143 +3477,112 @@ async def mam_search():
         "min_snatched": "tor[minSnatched]",
         "max_snatched": "tor[maxSnatched]"
     }
+    stat_filters = {}
     for arg_name, tor_name in stat_mappings.items():
-        if value := request.args.get(arg_name):
+        value = args.get(arg_name)
+        if value:
             params[tor_name] = value
+            stat_filters[arg_name] = value
 
     headers = {"Cookie": "; ".join([f"{k}={v}" for k, v in mam_session_cookies.items()])}
+
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"{app.config['MAM_API_URL']}/tor/js/loadSearchJSONbasic.php", params=params, headers=headers)
+            response = await client.get(
+                f"{app.config['MAM_API_URL']}/tor/js/loadSearchJSONbasic.php",
+                params=params,
+                headers=headers,
+            )
             update_cookies(response)
             response.raise_for_status()
             json_data = response.json()
-            results = json_data.get("data", [])
-            
-            # --- STEP 1: Rank Results FIRST ---
-            # We must rank BEFORE cleaning because rank_results expects raw JSON strings
-            ranked = rank_results(results)
-            
-            base_dl_url = f"{app.config['MAM_API_URL']}/tor/download.php/"
-            
-            # --- STEP 2: Clean Data for Display ---
-            # Now we decode HTML entities and fix formatting on the sorted list
-            for item in ranked:
-                # 1. Handle Download Links
-                if dl_hash := item.get('dl'): 
-                    item['download_link'] = base_dl_url + dl_hash
-                else: 
-                    item['download_link'] = '' 
-
-                # 2. Handle Thumbnails
-                if not item.get('thumbnail'):
-                    if item.get('id'):
-                        item['thumbnail'] = f"https://cdn.myanonamouse.net/t/p/small/{item['id']}.webp"
-                    else:
-                        cat = item.get('category', '')
-                        item['thumbnail'] = f"https://static.myanonamouse.net/pic/cats/3/{cat}.png"
-
-                # 3. Decode Metadata (Author, Narrator, Series)
-                # Note: rank_results may have already partially parsed these into strings.
-                # parse_mam_metadata handles both JSON strings AND plain strings safely.
-                item['author_info'] = parse_mam_metadata(item.get('author_info', ''))
-                item['narrator_info'] = parse_mam_metadata(item.get('narrator_info', ''))
-                
-                # Overwrite series_display with our cleaner, HTML-decoded version
-                item['series_display'] = parse_mam_metadata(item.get('series_info', ''), is_series=True)
-
-                language_id = str(item.get("language", "")).strip()
-                language_name = LANGUAGE_BY_ID.get(language_id)
-                if not language_name:
-                    language_name = item.get("lang_code") or item.get("language") or "Unknown"
-                item["language_name"] = language_name
-
-            # ... Rest of your function ...
-            client_status_data = await torrent_client.get_status() if torrent_client else {"status": "error"}
-            client_connected = client_status_data.get("status") == "success"
-            categories = await torrent_client.get_categories() if client_connected else {}
-            
-            mid_to_hash = {}
-            if client_connected and torrent_client:
-                try:
-                    all_torrents = await torrent_client.get_torrents_with_metadata()
-                    for torrent in all_torrents:
-                        comment = torrent.get('comment', '')
-                        if comment:
-                            mid_match = re.search(r'MID=(\d+)', comment)
-                            if mid_match:
-                                mid = mid_match.group(1)
-                                torrent_hash = torrent.get('hash', '')
-                                if torrent_hash:
-                                    mid_to_hash[mid] = torrent_hash
-                except Exception as e:
-                    app.logger.warning(f"Failed to fetch torrents with metadata: {e}")
-            
-            for item in ranked:
-                item_id = str(item.get('id', ''))
-                if item_id in mid_to_hash:
-                    item['my_snatched'] = 1
-            
-            metadata = load_database()
-            for item in ranked:
-                if item.get('my_snatched') == 1:
-                    item_id = str(item.get('id', ''))
-                    torrent_hash = mid_to_hash.get(item_id)
-                    if torrent_hash and torrent_hash not in metadata:
-                        metadata[torrent_hash] = {
-                            "mid": item_id,
-                            "author": item.get('author_info', ''), 
-                            "title": item.get('title', ''),
-                            "added_on": datetime.now().isoformat(),
-                            "status": "unknown",
-                            "retry_count": 0,
-                            "series_info": item.get('series_display', ''), 
-                            "category": get_category_name(item.get('main_cat', '')),
-                            "download_link": item.get('download_link', '')
-                        }
-            
-            if any(item.get('my_snatched') == 1 for item in ranked):
-                save_database(metadata)
-
-            display_results = ranked
-            if hide_downloaded:
-                display_results = [
-                    item for item in ranked
-                    if str(item.get('my_snatched', 0)) != "1"
-                ]
-
-            search_duration_ms = (time.monotonic() - search_started_at) * 1000
-            app.logger.info(
-                f"[SEARCH] results={len(display_results)} query_len={len(query)} "
-                f"scope={params.get('tor[searchIn]', 'torrents')} duration_ms={search_duration_ms:.1f}"
-            )
-            
-            return await render_template(
-                "partials/results.html",
-                results=display_results,
-                CLIENT_STATUS="CONNECTED" if client_connected else "NOT CONNECTED",
-                categories=categories,
-                TORRENT_CLIENT_CATEGORY=app.config.get("TORRENT_CLIENT_CATEGORY", ""),
-                DESTINATION_PATHS=app.config.get("DESTINATION_PATHS", FALLBACK_CONFIG["DESTINATION_PATHS"]),
-                TYPE_SPECIFIC_TORRENT_CATEGORIES=app.config.get(
-                    "TYPE_SPECIFIC_TORRENT_CATEGORIES",
-                    FALLBACK_CONFIG["TYPE_SPECIFIC_TORRENT_CATEGORIES"],
-                ),
-                IS_VIP_ACTIVE=is_vip_active,
-                RESULTS_DISPLAY_FIELDS=app.config.get(
-                    "RESULTS_DISPLAY_FIELDS",
-                    FALLBACK_CONFIG["RESULTS_DISPLAY_FIELDS"]
-                ),
-            )
-    except Exception as e:
-        error_message = format_mam_search_error(e)
+    except Exception as exc:
+        error_message = format_mam_search_error(exc)
         app.logger.error(
             f"[SEARCH] Failed query_len={len(query)}: {error_message}",
             exc_info=True,
         )
+        return {
+            "ok": False,
+            "status_code": mam_search_status_code_for_exception(exc),
+            "error_message": error_message,
+            "results": [],
+            "query": query,
+        }
+
+    results = json_data.get("data", [])
+    ranked = rank_results(results)
+    base_dl_url = f"{app.config['MAM_API_URL']}/tor/download.php/"
+    decorate_search_results(ranked, base_dl_url)
+
+    client_context = await get_search_client_context()
+    if client_context["connected"]:
+        mark_downloaded_results(ranked, client_context["mid_to_hash"])
+
+    display_results = ranked
+    if hide_downloaded:
+        display_results = [
+            item for item in ranked
+            if str(item.get('my_snatched', 0)) != "1"
+        ]
+
+    search_duration_ms = (time.monotonic() - search_started_at) * 1000
+    hidden_downloaded_count = len(ranked) - len(display_results)
+    app.logger.info(
+        f"[SEARCH] results={len(display_results)} query_len={len(query)} "
+        f"scope={params.get('tor[searchIn]', 'torrents')} duration_ms={search_duration_ms:.1f}"
+    )
+
+    return {
+        "ok": True,
+        "status_code": 200,
+        "query": query,
+        "results": display_results,
+        "total_results": len(display_results),
+        "raw_result_count": len(ranked),
+        "hidden_downloaded_count": hidden_downloaded_count,
+        "search_duration_ms": round(search_duration_ms, 1),
+        "mam": {
+            "connected": True,
+            "vip_active": is_vip_active,
+        },
+        "client": {
+            "connected": client_context["connected"],
+            "status": client_context["status"],
+            "categories": client_context["categories"],
+        },
+        "filters": {
+            "searchType": params["tor[searchType]"],
+            "search_scope": params.get("tor[searchIn]", "torrents"),
+            "hide_downloaded": hide_downloaded,
+            "language_ids": lang_ids,
+            "main_cat": main_cats,
+            "category_ids": category_ids,
+            "flag_ids": flag_ids,
+            "start_date": start_date,
+            "end_date": end_date,
+            "min_size": min_size,
+            "max_size": max_size,
+            "size_unit": size_unit,
+            "search_in": srch_in_fields,
+            "stats": stat_filters,
+        },
+    }
+
+
+@app.route('/api/v1/mam/search', methods=['GET'])
+@app.route('/mam/search', methods=['GET'])
+async def mam_search():
+    search_result = await execute_mam_search(request.args)
+    if request.path.startswith("/api/v1/"):
+        status_code = search_result.get("status_code", 200)
+        api_payload = {key: value for key, value in search_result.items() if key != "status_code"}
+        return jsonify(api_payload), status_code
+
+    if not search_result.get("ok"):
         return await render_template(
             "partials/results.html",
-            error_message=error_message,
+            error_message=search_result.get("error_message", "Search failed"),
             DESTINATION_PATHS=app.config.get("DESTINATION_PATHS", FALLBACK_CONFIG["DESTINATION_PATHS"]),
             TORRENT_CLIENT_CATEGORY=app.config.get("TORRENT_CLIENT_CATEGORY", ""),
             TYPE_SPECIFIC_TORRENT_CATEGORIES=app.config.get(
@@ -3469,6 +3594,24 @@ async def mam_search():
                 FALLBACK_CONFIG["RESULTS_DISPLAY_FIELDS"]
             ),
         )
+
+    return await render_template(
+        "partials/results.html",
+        results=search_result["results"],
+        CLIENT_STATUS="CONNECTED" if search_result["client"]["connected"] else "NOT CONNECTED",
+        categories=search_result["client"]["categories"],
+        TORRENT_CLIENT_CATEGORY=app.config.get("TORRENT_CLIENT_CATEGORY", ""),
+        DESTINATION_PATHS=app.config.get("DESTINATION_PATHS", FALLBACK_CONFIG["DESTINATION_PATHS"]),
+        TYPE_SPECIFIC_TORRENT_CATEGORIES=app.config.get(
+            "TYPE_SPECIFIC_TORRENT_CATEGORIES",
+            FALLBACK_CONFIG["TYPE_SPECIFIC_TORRENT_CATEGORIES"],
+        ),
+        IS_VIP_ACTIVE=search_result["mam"]["vip_active"],
+        RESULTS_DISPLAY_FIELDS=app.config.get(
+            "RESULTS_DISPLAY_FIELDS",
+            FALLBACK_CONFIG["RESULTS_DISPLAY_FIELDS"]
+        ),
+    )
 
 @app.route("/")
 async def index():
@@ -3757,6 +3900,54 @@ async def api_settings():
     return jsonify({
         "status": "success",
         "DEFAULT_RELATIVE_PATH_TEMPLATE": template_value
+    })
+
+
+@app.route("/api/v1/info", methods=["GET"])
+async def api_v1_info():
+    return jsonify({
+        "service": "MouseSearch API",
+        "api_version": "v1",
+        "network_scope": "Designed for private use on trusted networks such as Tailscale.",
+        "authentication": {
+            "mode": "none",
+            "notes": "This deployment is intended to stay tailnet-only. Add your own proxy auth if you ever expose it more broadly.",
+        },
+        "agent_instructions": [
+            "Start with GET /api/v1/mam/status and GET /api/v1/client/status to confirm both backends are healthy.",
+            "Use GET /api/v1/mam/search with query plus optional filters to retrieve ranked JSON results.",
+            "Use a result's download_link as torrent_url when calling POST /api/v1/client/add.",
+            "If add returns a message without a hash, resolve it with POST /api/v1/client/resolve_mid using the MAM torrent id.",
+            "Use GET /api/v1/client/info/<hash> or POST /api/v1/client/info/batch to monitor progress after adding.",
+        ],
+        "endpoints": [
+            {"method": "GET", "path": "/api/v1/info"},
+            {"method": "GET", "path": "/api/v1/mam/status"},
+            {"method": "GET", "path": "/api/v1/mam/user_data"},
+            {"method": "GET", "path": "/api/v1/mam/autosuggest"},
+            {"method": "GET", "path": "/api/v1/mam/search"},
+            {"method": "GET", "path": "/api/v1/client/status"},
+            {"method": "GET", "path": "/api/v1/client/categories"},
+            {"method": "POST", "path": "/api/v1/client/add"},
+            {"method": "POST", "path": "/api/v1/client/resolve_mid"},
+            {"method": "GET", "path": "/api/v1/client/info/<hash>"},
+            {"method": "POST", "path": "/api/v1/client/info/batch"},
+        ],
+        "examples": {
+            "search": "/api/v1/mam/search?query=harry+potter&hide_downloaded=true",
+            "add": {
+                "method": "POST",
+                "path": "/api/v1/client/add",
+                "json": {
+                    "torrent_url": "https://www.myanonamouse.net/tor/download.php/example",
+                    "title": "Example Title",
+                    "author": "Example Author",
+                    "id": "1234567",
+                    "category": "audiobooks",
+                    "download_link": "https://www.myanonamouse.net/tor/download.php/example",
+                },
+            },
+        },
     })
 
 @app.route("/update_settings", methods=["POST"])

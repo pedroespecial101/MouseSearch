@@ -51,6 +51,77 @@ For the OCI A1 host workflow used in this repo, see the deployment bundle in `de
 
 ---
 
+## Automation Interfaces
+
+MouseSearch now exposes two automation-friendly layers in addition to the browser UI:
+
+- A JSON API under `/api/v1/*`
+- An MCP server in [mcp_server.py](/Users/petetreadaway/Projects/MouseSearch/mcp_server.py) that wraps the JSON API over HTTP
+
+### JSON API
+
+The JSON API is intended for private use on a trusted network such as Tailscale.
+
+Useful endpoints:
+
+- `GET /api/v1/info`
+- `GET /api/v1/mam/status`
+- `GET /api/v1/mam/user_data`
+- `GET /api/v1/mam/search`
+- `GET /api/v1/client/status`
+- `GET /api/v1/client/categories`
+- `POST /api/v1/client/add`
+- `POST /api/v1/client/resolve_mid`
+- `GET /api/v1/client/info/<hash>`
+- `POST /api/v1/client/info/batch`
+
+Example search:
+
+```bash
+curl "http://127.0.0.1:5000/api/v1/mam/search?query=harry+potter&hide_downloaded=true"
+```
+
+Example add:
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/v1/client/add \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "torrent_url": "https://www.myanonamouse.net/tor/download.php/example",
+    "title": "Example Title",
+    "author": "Example Author",
+    "id": "1234567",
+    "category": "audiobooks"
+  }'
+```
+
+### MCP Server
+
+Install dependencies as usual, then run the MCP server:
+
+```bash
+python3 mcp_server.py
+```
+
+By default it listens on `0.0.0.0:8765` and talks to the local MouseSearch API at `http://127.0.0.1:5000/api/v1`.
+
+Optional environment variables:
+
+- `MOUSESEARCH_API_BASE_URL`
+- `MOUSESEARCH_API_TOKEN`
+- `MOUSESEARCH_MCP_HOST`
+- `MOUSESEARCH_MCP_PORT`
+
+The HTTP MCP server is designed for agents. Its built-in instructions recommend a simple workflow:
+
+1. Check MAM and torrent-client status
+2. Search MAM
+3. Add a torrent using a search result's `download_link`
+4. Resolve MID to hash if needed
+5. Monitor the torrent with `torrent_info` or `torrent_info_batch`
+
+---
+
 ## Installation Method 1: Docker (Recommended)
 
 ### Prerequisites
