@@ -47,6 +47,8 @@ MouseSearch can be deployed in two ways:
 1. **Docker (Recommended)** - Use the pre-built image from Docker Hub
 2. **Bare Metal** - Run directly on your system using the provided launch script
 
+For the OCI A1 host workflow used in this repo, see the deployment bundle in `deploy/oci/`.
+
 ---
 
 ## Installation Method 1: Docker (Recommended)

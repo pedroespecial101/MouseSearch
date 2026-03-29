@@ -7,6 +7,7 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 - The target OCI host for this project is `pedroserve02-A1` (`arm64`, 4 OCPU, 24 GB RAM).
 - Prefer Tailscale access: `ssh ubuntu@pedroserve02-a1`.
 - Read global host guidance in [~/.codex/AGENTS.md](/Users/petetreadaway/.codex/AGENTS.md) and the detailed server docs in `/Users/petetreadaway/Projects/OCI-Server-Config/` before making deployment changes.
+- The repo-owned OCI deployment bundle lives in `/Users/petetreadaway/Projects/MouseSearch/deploy/oci/`.
 - On that host, source repos belong in `~/projects/` and persistent bind mounts belong in `/opt/appdata/<app-name>/`.
 - For MouseSearch specifically, default to building from source on the OCI host unless you have confirmed a `linux/arm64` image tag. The upstream `sevenlayercookie/mousesearch:latest` image was observed as `amd64`-only during planning.
 - Prefer bind mounts for:

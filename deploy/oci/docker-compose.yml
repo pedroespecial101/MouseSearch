@@ -1,0 +1,49 @@
+services:
+  ts-mousesearch:
+    image: tailscale/tailscale:v1.94.2
+    container_name: ts-mousesearch
+    hostname: ${TS_HOSTNAME:-mousesearch}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_HOSTNAME: ${TS_HOSTNAME:-mousesearch}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TZ: ${TZ:-Europe/London}
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    volumes:
+      - /opt/appdata/mousesearch/tailscale:/var/lib/tailscale
+      - /opt/appdata/mousesearch/serve.json:/config/serve.json:ro
+    restart: unless-stopped
+
+  mousesearch:
+    build:
+      context: /home/ubuntu/projects/MouseSearch
+    container_name: mousesearch
+    network_mode: service:ts-mousesearch
+    depends_on:
+      - ts-mousesearch
+    environment:
+      TZ: ${TZ:-Europe/London}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      QUART_SECRET_KEY: ${QUART_SECRET_KEY}
+      MAM_ID: ${MAM_ID}
+      TORRENT_CLIENT_TYPE: ${TORRENT_CLIENT_TYPE:-qbittorrent}
+      TORRENT_CLIENT_URL: ${TORRENT_CLIENT_URL}
+      TORRENT_CLIENT_USERNAME: ${TORRENT_CLIENT_USERNAME}
+      TORRENT_CLIENT_PASSWORD: ${TORRENT_CLIENT_PASSWORD}
+      TORRENT_CLIENT_CATEGORY: ${TORRENT_CLIENT_CATEGORY:-}
+      QB_FORCE_START: ${QB_FORCE_START:-false}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
+      ACCESS_LOGFILE: ${ACCESS_LOGFILE:-/dev/null}
+      DATA_PATH: /data
+      AUTO_ORGANIZE_ON_ADD: "false"
+      AUTO_ORGANIZE_ON_SCHEDULE: "false"
+      AUTO_ORGANIZE_USE_COPY: "false"
+    volumes:
+      - /opt/appdata/mousesearch/data:/data
+    restart: unless-stopped
