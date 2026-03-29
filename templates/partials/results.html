@@ -181,6 +181,16 @@
             <div class="d-grid gap-2" style="width:100%" {% if CLIENT_STATUS !='CONNECTED'
                 %}title="Torrent client is not connected." {% endif %}>
 
+                <button type="button" class="btn btn-success w-100 shadow-sm fw-bold quick-add-to-client-button"
+                    data-torrent-url="{{ result.download_link | safe }}" data-author="{{ result.author_info }}"
+                    data-title="{{ result.title }}" data-id="{{ result.id }}" data-size="{{ result.size }}"
+                    data-free="{{ result.free }}" data-personal-freeleech="{{ result.personal_freeleech }}"
+                    data-fl-vip="{{ result.fl_vip }}"
+                    data-main-cat="{{ result.main_cat }}" data-series-info="{{ result.series_info | escape }}" {% if
+                    CLIENT_STATUS !='CONNECTED' %}disabled{% endif %}>
+                    <i class="bi bi-lightning-charge-fill me-1"></i> Quick Add
+                </button>
+
                 <button type="button" class="btn btn-primary btn-sm w-100 shadow-sm fw-semibold add-to-client-button"
                     data-torrent-url="{{ result.download_link | safe }}" data-author="{{ result.author_info }}"
                     data-title="{{ result.title }}" data-id="{{ result.id }}" data-size="{{ result.size }}"

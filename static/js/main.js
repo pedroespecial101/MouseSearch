@@ -4214,7 +4214,19 @@ document.addEventListener("DOMContentLoaded", async function () {
     if (resultsContainer) {
         resultsContainer.addEventListener('click', function (event) {
 
-            // CASE A: Clicked the "Download" button
+            // CASE A: Clicked the "Quick Add" button
+            const quickAddButton = event.target.closest('.quick-add-to-client-button');
+            if (quickAddButton) {
+                event.preventDefault();
+                event.stopPropagation(); // Prevent opening the details modal
+                triggerHaptic('download');
+
+                const resultItem = quickAddButton.closest('.result-item');
+                initiateDownloadFlow(quickAddButton, resultItem, { skipConfirm: true });
+                return;
+            }
+
+            // CASE B: Clicked the "Download" button
             const button = event.target.closest('.add-to-client-button');
             if (button) {
                 event.preventDefault();
@@ -4226,13 +4238,13 @@ document.addEventListener("DOMContentLoaded", async function () {
                 return;
             }
 
-            // CASE B: Clicked a Dropdown or Link (e.g., Author link)
+            // CASE C: Clicked a Dropdown or Link (e.g., Author link)
             // We want default browser behavior, NOT opening the details modal
             if (event.target.closest('select') || event.target.closest('a')) {
                 return;
             }
 
-            // CASE C: Clicked the Row (Result Item) -> Open Details Modal
+            // CASE D: Clicked the Row (Result Item) -> Open Details Modal
             const resultItem = event.target.closest('.result-item');
             if (resultItem) {
                 // Retrieve the full JSON we injected into the HTML
@@ -4257,7 +4269,7 @@ document.addEventListener("DOMContentLoaded", async function () {
  * @param {HTMLElement} button - The button clicked (contains data attributes)
  * @param {HTMLElement} resultItem - The row element (contains the category dropdown)
  */
-    function initiateDownloadFlow(button, resultItem) {
+    function initiateDownloadFlow(button, resultItem, options = {}) {
         const rawSeries = button.dataset.seriesInfo;
         const primarySeries = getPrimarySeriesInfo(rawSeries);
         const seriesName = primarySeries?.name || null;
@@ -4286,14 +4298,20 @@ document.addEventListener("DOMContentLoaded", async function () {
             downloadData.personal_freeleech = 1;
         }
 
-        // 2. Check if Auto-Organize is enabled
-        const autoOrganizeEnabled = document.getElementById('AUTO_ORGANIZE_ON_ADD')?.checked;
+        const skipConfirm = options.skipConfirm === true;
+        const autoOrganizeEnabled = document.getElementById('AUTO_ORGANIZE_ON_ADD')?.checked && !skipConfirm;
+
+        if (skipConfirm) {
+            downloadData.skip_auto_organize = true;
+            delete downloadData.custom_relative_path;
+            delete downloadData.custom_destination_path;
+        }
 
         // Save data to global vars for the "Confirm" button to use later
         pendingDownloadData = downloadData;
         pendingButton = button;
 
-        if (confirmModal) {
+        if (confirmModal && !skipConfirm) {
             if (autoOrganizeSection) {
                 autoOrganizeSection.classList.toggle('d-none', !autoOrganizeEnabled);
             }
@@ -4575,11 +4593,16 @@ document.addEventListener("DOMContentLoaded", async function () {
         }
 
         const dlBtn = document.getElementById('detail-download-btn');
+        const quickAddBtn = document.getElementById('detail-quick-add-btn');
 
         // Reset button state in case a previous book download changed it (e.g. "Added!" + disabled)
         if (dlBtn) {
             dlBtn.disabled = false;
             dlBtn.innerHTML = '<i class="bi bi-play-fill me-1"></i> Download';
+        }
+        if (quickAddBtn) {
+            quickAddBtn.disabled = false;
+            quickAddBtn.innerHTML = '<i class="bi bi-lightning-charge-fill me-1"></i> Quick Add';
         }
 
         dlBtn.dataset.torrentUrl = data.download_link;
@@ -4593,6 +4616,19 @@ document.addEventListener("DOMContentLoaded", async function () {
         dlBtn.dataset.personalFreeleech = data.personal_freeleech;
         dlBtn.dataset.flVip = data.fl_vip;
 
+        if (quickAddBtn) {
+            quickAddBtn.dataset.torrentUrl = data.download_link;
+            quickAddBtn.dataset.id = data.id;
+            quickAddBtn.dataset.author = authors;
+            quickAddBtn.dataset.title = data.title;
+            quickAddBtn.dataset.size = data.size;
+            quickAddBtn.dataset.mainCat = data.main_cat;
+            quickAddBtn.dataset.seriesInfo = data.series_info;
+            quickAddBtn.dataset.free = data.free;
+            quickAddBtn.dataset.personalFreeleech = data.personal_freeleech;
+            quickAddBtn.dataset.flVip = data.fl_vip;
+        }
+
         const detailCategorySelect = document.getElementById('detail-cat-select');
         if (detailCategorySelect) {
             detailCategorySelect.dataset.mainCat = data.main_cat || '';
@@ -4601,10 +4637,18 @@ document.addEventListener("DOMContentLoaded", async function () {
 
         const newDlBtn = dlBtn.cloneNode(true);
         dlBtn.parentNode.replaceChild(newDlBtn, dlBtn);
+        const newQuickAddBtn = quickAddBtn ? quickAddBtn.cloneNode(true) : null;
+        if (quickAddBtn && newQuickAddBtn) {
+            quickAddBtn.parentNode.replaceChild(newQuickAddBtn, quickAddBtn);
+        }
 
         newDlBtn.addEventListener('click', function () {
             triggerHaptic('download');
             initiateDownloadFlow(this, null);
+        });
+        newQuickAddBtn?.addEventListener('click', function () {
+            triggerHaptic('download');
+            initiateDownloadFlow(this, null, { skipConfirm: true });
         });
 
         document.getElementById('detail-torrent-link').href = data.download_link;
@@ -4635,6 +4679,7 @@ document.addEventListener("DOMContentLoaded", async function () {
         if (!pendingDownloadData) return;
         triggerHaptic('download');
         const autoOrganizeEnabled = document.getElementById('AUTO_ORGANIZE_ON_ADD')?.checked;
+        delete pendingDownloadData.skip_auto_organize;
         if (autoOrganizeEnabled && confirmInput) {
             pendingDownloadData.custom_relative_path = confirmInput.value;
             pendingDownloadData.custom_destination_path = confirmDestinationSelect?.value || '';

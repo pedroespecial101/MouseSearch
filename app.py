@@ -2744,6 +2744,7 @@ async def client_add_torrent():
     
     await torrent_client.login()
     incoming_data = await request.get_json(silent=True) or {}
+    skip_auto_organize = bool(incoming_data.get('skip_auto_organize'))
     
     # --- NEW: Extract custom path ---
     custom_relative_path = incoming_data.get('custom_relative_path')
@@ -2890,7 +2891,7 @@ async def client_add_torrent():
             }
 
             if resolved_hash:
-                if app.config.get("AUTO_ORGANIZE_ON_ADD"):
+                if app.config.get("AUTO_ORGANIZE_ON_ADD") and not skip_auto_organize:
                     metadata = load_database()
                     metadata[resolved_hash] = metadata_payload
                     save_database(metadata)
@@ -2923,7 +2924,7 @@ async def client_add_torrent():
         app.logger.warning(f"WARNING: running hash calculation for torrent URL without MID: {torrent_url}")
         hash_val = await calculate_torrent_hash_from_url(torrent_url)
     
-    if app.config.get("AUTO_ORGANIZE_ON_ADD"):
+    if app.config.get("AUTO_ORGANIZE_ON_ADD") and not skip_auto_organize:
         if not hash_val:
             auto_organize_warning = "Unable to calculate hash - auto-organization will not work."
         else:
