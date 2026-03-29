@@ -111,6 +111,7 @@ python3 mcp_server.py
 ```
 
 By default it listens on `0.0.0.0:8765` and talks to the local MouseSearch API at `http://127.0.0.1:5000/api/v1`.
+On the OCI Tailscale deployment, MCP is exposed on the main hostname at `/mcp`.
 
 Optional environment variables:
 

@@ -7,15 +7,11 @@
   "Web": {
     "mousesearch.bearded-pomano.ts.net:443": {
       "Handlers": {
+        "/mcp": {
+          "Proxy": "http://127.0.0.1:8765/mcp"
+        },
         "/": {
           "Proxy": "http://127.0.0.1:5000"
-        }
-      }
-    },
-    "mousesearch-mcp.bearded-pomano.ts.net:443": {
-      "Handlers": {
-        "/": {
-          "Proxy": "http://127.0.0.1:8765"
         }
       }
     }

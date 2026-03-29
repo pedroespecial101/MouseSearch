@@ -82,7 +82,7 @@ Boolean values should be sent as `true` or `false`.
 Base URL examples:
 
 - local MCP server: `http://127.0.0.1:8765/mcp`
-- OCI Tailscale MCP: `https://mousesearch-mcp.bearded-pomano.ts.net/mcp`
+- OCI Tailscale MCP: `https://mousesearch.bearded-pomano.ts.net/mcp`
 
 The server is designed to be agent-friendly and wraps the JSON API instead of reimplementing tracker or torrent-client behavior.
 
@@ -115,7 +115,7 @@ The server is designed to be agent-friendly and wraps the JSON API instead of re
 import asyncio
 from fastmcp import Client
 
-client = Client("https://mousesearch-mcp.bearded-pomano.ts.net/mcp")
+client = Client("https://mousesearch.bearded-pomano.ts.net/mcp")
 
 async def main():
     async with client:

@@ -16,7 +16,7 @@ Related docs:
 
 - `docker-compose.yml`: OCI stack using an on-host ARM64 build
 - `mousesearch.env.example`: server-local environment template
-- `serve.json`: Tailscale Serve config for `https://mousesearch.bearded-pomano.ts.net` and the optional MCP hostname `https://mousesearch-mcp.bearded-pomano.ts.net`
+- `serve.json`: Tailscale Serve config for `https://mousesearch.bearded-pomano.ts.net` and the optional MCP path at `https://mousesearch.bearded-pomano.ts.net/mcp`
 - `install-on-server.sh`: provisions `/opt/appdata/mousesearch` and installs the deployment files
 
 ## Provision The Host
@@ -67,7 +67,7 @@ Set `PUID` and `PGID` to the real host account you want owning the data files. O
 
 For `TORRENT_CLIENT_URL`, prefer a Tailscale IP or another address resolvable from inside the container namespace, and omit any trailing slash. During deployment testing on this host, `http://100.85.214.86:18080` worked while `http://optiplex3070-1:18080/` did not.
 
-If you want the optional HTTP MCP layer, leave `MOUSESEARCH_API_BASE_URL` at `http://127.0.0.1:5000/api/v1` unless you have a reason to change it. The MCP profile shares the same Tailscale namespace and proxies HTTP on port `8765`.
+If you want the optional HTTP MCP layer, leave `MOUSESEARCH_API_BASE_URL` at `http://127.0.0.1:5000/api/v1` unless you have a reason to change it. The MCP profile shares the same Tailscale namespace and is exposed at `/mcp` on the main Tailscale hostname.
 
 ## Validate And Start
 
@@ -117,7 +117,7 @@ https://mousesearch.bearded-pomano.ts.net
 If the MCP profile is enabled, its Tailscale URL is:
 
 ```text
-https://mousesearch-mcp.bearded-pomano.ts.net
+https://mousesearch.bearded-pomano.ts.net/mcp
 ```
 
 ## First-Run Application Scope

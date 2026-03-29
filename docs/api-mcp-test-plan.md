@@ -20,7 +20,7 @@ Validate:
 - Torrent client is configured and connected
 - Tailscale Serve is active for:
   - `https://mousesearch.bearded-pomano.ts.net`
-  - `https://mousesearch-mcp.bearded-pomano.ts.net`
+  - `https://mousesearch.bearded-pomano.ts.net/mcp`
 
 ## Test Cases
 
@@ -115,7 +115,7 @@ Goal: confirm the HTTP MCP endpoint is reachable over Tailscale.
 
 Method:
 
-- connect a FastMCP client to `https://mousesearch-mcp.bearded-pomano.ts.net/mcp`
+- connect a FastMCP client to `https://mousesearch.bearded-pomano.ts.net/mcp`
 
 Pass criteria:
 
