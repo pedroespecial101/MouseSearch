@@ -48,6 +48,8 @@ MouseSearch can be deployed in two ways:
 2. **Bare Metal** - Run directly on your system using the provided launch script
 
 For the OCI A1 host workflow used in this repo, see the deployment bundle in `deploy/oci/`.
+For automation usage details, see [docs/api-mcp-usage.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-usage.md).
+For rollout validation, see [docs/api-mcp-test-plan.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-test-plan.md).
 
 ---
 
@@ -57,6 +59,11 @@ MouseSearch now exposes two automation-friendly layers in addition to the browse
 
 - A JSON API under `/api/v1/*`
 - An MCP server in [mcp_server.py](/Users/petetreadaway/Projects/MouseSearch/mcp_server.py) that wraps the JSON API over HTTP
+
+Primary usage docs:
+
+- [docs/api-mcp-usage.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-usage.md)
+- [docs/api-mcp-test-plan.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-test-plan.md)
 
 ### JSON API
 

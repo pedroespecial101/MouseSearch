@@ -7,6 +7,11 @@ This bundle targets the OCI host `pedroserve02-A1` and follows the same conventi
 - private access through a dedicated Tailscale sidecar
 - no `/downloads` mount and no `AUTO_ORGANIZE_*` settings in the first rollout
 
+Related docs:
+
+- API and MCP usage: [docs/api-mcp-usage.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-usage.md)
+- API and MCP rollout tests: [docs/api-mcp-test-plan.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-test-plan.md)
+
 ## Files
 
 - `docker-compose.yml`: OCI stack using an on-host ARM64 build

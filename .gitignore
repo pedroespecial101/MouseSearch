@@ -10,6 +10,9 @@ reloadService.sh
 compose.yaml
 tools/
 docs/
+!docs/
+!docs/api-mcp-usage.md
+!docs/api-mcp-test-plan.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
