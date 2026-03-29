@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "MouseSearch",
+  "project_id": "917d65ad-e12a-4b29-a4e9-4336ebee990a"
+}
