@@ -26,6 +26,21 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
+## Beads Dolt Remote Setup
+
+- This repo uses the same GitHub repository for both Git and Beads/Dolt sync.
+- Dolt 1.81.10+ can store Dolt data on a dedicated Git ref inside a normal Git remote, so a separate DoltHub repo is not required.
+- One-time setup for a fresh clone:
+
+```bash
+bd dolt remote add origin "$(git remote get-url origin)"
+bd vc commit -m "Configure Beads Dolt remote"
+bd dolt push
+```
+
+- If `git remote get-url origin` returns an SSH URL, that is fine. HTTPS also works as long as your Git credentials already work non-interactively.
+- The Git remote must already exist and have at least one branch before you add it as a Dolt remote.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
