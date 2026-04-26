@@ -69,6 +69,42 @@ For `TORRENT_CLIENT_URL`, prefer a Tailscale IP or another address resolvable fr
 
 If you want the optional HTTP MCP layer, leave `MOUSESEARCH_API_BASE_URL` at `http://127.0.0.1:5000/api/v1` unless you have a reason to change it. The MCP profile shares the same Tailscale namespace and is exposed at `/mcp` on the main Tailscale hostname.
 
+MouseSearch v1.0.0 adds optional Mousehole cookie sync, Hardcover enrichment, auto-task webhooks, haptics, and a personal Freeleech minimum-size gate. The OCI example keeps these inert by default: Mousehole is disabled, webhooks have no URL, and Hardcover has no token. Add secrets to the server-local `.env` only when you intend to enable the related feature.
+
+## Rollback Backup Before Upgrade
+
+Before upgrading an existing deployment, capture the current commit and server state:
+
+```bash
+cd /home/ubuntu/projects/MouseSearch
+CURRENT_SHA="$(git rev-parse HEAD)"
+BACKUP_DIR="/mnt/pedrostore01/backups/mousesearch/pre-v1.0.0-$(date +%Y%m%d%H%M%S)"
+sudo install -d -m 0700 "$BACKUP_DIR"
+printf '%s\n' "$CURRENT_SHA" | sudo tee "$BACKUP_DIR/git-sha.txt" >/dev/null
+sudo cp -f /opt/appdata/mousesearch/docker-compose.yml "$BACKUP_DIR/docker-compose.yml"
+sudo cp -f /opt/appdata/mousesearch/serve.json "$BACKUP_DIR/serve.json"
+sudo cp -f /opt/appdata/mousesearch/.env "$BACKUP_DIR/env"
+sudo cp -a /opt/appdata/mousesearch/data "$BACKUP_DIR/data"
+```
+
+To roll back, restore those files and rebuild from the recorded SHA:
+
+```bash
+cd /home/ubuntu/projects/MouseSearch
+ROLLBACK_DIR="/mnt/pedrostore01/backups/mousesearch/pre-v1.0.0-YYYYMMDDHHMMSS"
+git fetch origin
+git checkout "$(sudo cat "$ROLLBACK_DIR/git-sha.txt")"
+sudo cp -f "$ROLLBACK_DIR/docker-compose.yml" /opt/appdata/mousesearch/docker-compose.yml
+sudo cp -f "$ROLLBACK_DIR/serve.json" /opt/appdata/mousesearch/serve.json
+sudo cp -f "$ROLLBACK_DIR/env" /opt/appdata/mousesearch/.env
+sudo rm -rf /opt/appdata/mousesearch/data
+sudo cp -a "$ROLLBACK_DIR/data" /opt/appdata/mousesearch/data
+cd /opt/appdata/mousesearch
+docker compose --env-file .env up -d --build
+```
+
+Keep `pre-v1.0.0-*` backups for 14 stable days, then remove them after confirming the app, `/api/v1/info`, MAM status, and torrent-client status are healthy.
+
 ## Validate And Start
 
 Render and validate the stack:
@@ -82,7 +118,7 @@ docker compose --env-file .env build
 Start the stack:
 
 ```bash
-docker compose --env-file .env up -d
+docker compose --env-file .env up -d --build
 ```
 
 Start the optional HTTP MCP profile:

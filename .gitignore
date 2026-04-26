@@ -8,11 +8,14 @@ reloadService.sh
 # Custom
 # buildImage.sh
 compose.yaml
-tools/
 docs/
 !docs/
 !docs/api-mcp-usage.md
 !docs/api-mcp-test-plan.md
+
+tools/.env
+tools/.env.*
+tools/*.local
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -317,3 +320,5 @@ forum_post.html
 .dolt/
 *.db
 .beads-credential-key
+.env.bak
+.playwright-mcp/

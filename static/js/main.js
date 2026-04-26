@@ -11,6 +11,10 @@ const redXIcon = `<img src="/static/icons/x_circle.svg" alt="not connected" styl
 // Global State
 const torrentHashMap = {};
 const hashToElementMap = new Map();
+const hardcoverEnrichmentPollers = new Map();
+const hardcoverEnrichmentObservers = new Map();
+const hardcoverEnrichmentQueueRequests = new Map();
+const HARDCOVER_LAZY_BUFFER_ROWS = 2;
 let lastClientStatus = null;
 let lastPerformedQuery = null;
 window.currentVipUntil = null;
@@ -30,6 +34,90 @@ const AUTOSUGGEST_CACHE_MAX_ENTRIES = 300;
 const AUTOSUGGEST_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const autosuggestCache = window.__autosuggestCache instanceof Map ? window.__autosuggestCache : new Map();
 window.__autosuggestCache = autosuggestCache;
+const hardcoverSeriesCache = window.__hardcoverSeriesCache instanceof Map ? window.__hardcoverSeriesCache : new Map();
+window.__hardcoverSeriesCache = hardcoverSeriesCache;
+const hardcoverPendingStatusBookIds = window.__hardcoverPendingStatusBookIds instanceof Set ? window.__hardcoverPendingStatusBookIds : new Set();
+window.__hardcoverPendingStatusBookIds = hardcoverPendingStatusBookIds;
+const pendingHardcoverEnrichmentPayloads = window.__pendingHardcoverEnrichmentPayloads instanceof Map ? window.__pendingHardcoverEnrichmentPayloads : new Map();
+window.__pendingHardcoverEnrichmentPayloads = pendingHardcoverEnrichmentPayloads;
+let hardcoverStatusPickerOpenedAt = 0;
+const MOUSESEARCH_LOGO_URL = '/static/icons/mouse.svg';
+const HARDCOVER_LOGO_URL = '/static/icons/hardcover.png';
+const HARDCOVER_STATUS_DEFINITIONS = Object.freeze([
+    {
+        statusId: 1,
+        key: 'want-to-read',
+        label: 'Want to Read',
+        viewBox: '0 0 384 512',
+        iconPaths: `
+            <path d="M0 487.7V48C0 21.5 21.5 0 48 0h48v322.1c0 12.8 14.2 20.4 24.9 13.3L192 288l71.1 47.4c10.6 7.1 24.9-.5 24.9-13.3V0h48c26.5 0 48 21.5 48 48v439.7a24.33 24.33 0 0 1-38.3 19.9L192 400 38.3 507.6A24.33 24.33 0 0 1 0 487.7" fill="currentColor"></path>
+            <path d="m192 288-71.1 47.4c-10.6 7.1-24.9-.5-24.9-13.3V0h192v322.1c0 12.8-14.2 20.4-24.9 13.3z" fill="currentColor" opacity="0.4"></path>`,
+    },
+    {
+        statusId: 2,
+        key: 'currently-reading',
+        label: 'Reading',
+        viewBox: '0 0 576 512',
+        iconPaths: `
+            <path d="M288 72v408s-92.8-32-144-32c-38.5 0-88.4 12.1-119.9 22.6C12.8 474.3 0 466 0 454.1V83.8c0-12.1 6.8-23.3 18.1-27.7C46.3 45.3 93.5 32 144 32c64 0 128 24 144 40" fill="currentColor"></path>
+            <path d="M288 72v408s92.8-32 144-32c38.5 0 88.4 12.1 119.9 22.6 11.3 3.8 24.1-4.6 24.1-16.5V83.8c0-12.1-6.8-23.3-18.1-27.6C529.7 45.3 482.5 32 432 32c-64 0-128 24-144 40" fill="currentColor" opacity="0.4"></path>`,
+    },
+    {
+        statusId: 3,
+        key: 'read',
+        label: 'Read',
+        viewBox: '0 0 512 512',
+        iconPaths: `
+            <path d="M369 175a23.9 23.9 0 0 1 0 33.9L241 337a23.9 23.9 0 0 1-33.9 0l-64-64c-9.4-9.4-9.4-24.6 0-33.9s24.6-9.4 33.9 0l47 47L335 175a23.9 23.9 0 0 1 33.9 0z" fill="currentColor"></path>
+            <path d="M256 0a96 96 0 0 1 84.9 51.1C373.8 41 411 49 437 75s34 63.3 23.9 96.1A96 96 0 0 1 512 256a96 96 0 0 1-51.1 84.9C471 373.8 463 411 437 437s-63.3 34-96.1 23.9A96 96 0 0 1 256 512a96 96 0 0 1-84.9-51.1C138.2 471 101 463 75 437s-34-63.3-23.9-96.1A96 96 0 0 1 0 256a96 96 0 0 1 51.1-84.9C41 138.2 49 101 75 75s63.3-34 96.1-23.9A96 96 0 0 1 256 0m113 209c9.4-9.4 9.4-24.6 0-33.9s-24.6-9.4-33.9 0l-111 111-47-47c-9.4-9.4-24.6-9.4-33.9 0s-9.4 24.6 0 33.9l64 64a23.9 23.9 0 0 0 33.9 0z" fill="currentColor" opacity="0.4"></path>`,
+    },
+    {
+        statusId: 4,
+        key: 'paused',
+        label: 'Paused',
+        viewBox: '0 0 512 512',
+        iconPaths: `
+            <path d="M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512z" fill="currentColor" opacity="0.18"></path>
+            <path d="M184 160c0-8.8 7.2-16 16-16h24c8.8 0 16 7.2 16 16v192c0 8.8-7.2 16-16 16h-24c-8.8 0-16-7.2-16-16V160zm104-16h24c8.8 0 16 7.2 16 16v192c0 8.8-7.2 16-16 16h-24c-8.8 0-16-7.2-16-16V160c0-8.8 7.2-16 16-16z" fill="currentColor"></path>`,
+    },
+    {
+        statusId: 5,
+        key: 'did-not-finish',
+        label: 'Did Not Finish',
+        viewBox: '0 0 512 512',
+        iconPaths: `
+            <path d="M256 512a256 256 0 1 0 0-512 256 256 0 1 0 0 512m-64-352h128c17.7 0 32 14.3 32 32v128c0 17.7-14.3 32-32 32H192c-17.7 0-32-14.3-32-32V192c0-17.7 14.3-32 32-32" fill="currentColor" opacity="0.4"></path>`,
+    },
+    {
+        statusId: 6,
+        key: 'ignored',
+        label: 'Ignored',
+        viewBox: '0 0 512 512',
+        iconPaths: `
+            <path d="M256 8C119 8 8 119 8 256s111 248 248 248 248-111 248-248S393 8 256 8z" fill="currentColor" opacity="0.18"></path>
+            <path d="M363.3 148.7c9.4 9.4 9.4 24.6 0 33.9L182.6 363.3c-9.4 9.4-24.6 9.4-33.9 0s-9.4-24.6 0-33.9l180.7-180.7c9.4-9.4 24.6-9.4 33.9 0z" fill="currentColor"></path>`,
+    },
+]);
+const HARDCOVER_STATUS_BY_ID = new Map(HARDCOVER_STATUS_DEFINITIONS.map(status => [status.statusId, status]));
+const HARDCOVER_STATUS_OPTIONS = Object.freeze(HARDCOVER_STATUS_DEFINITIONS.filter(status =>
+    [1, 2, 3, 5].includes(status.statusId)
+));
+const HARDCOVER_REMOVE_ACTION = Object.freeze({
+    key: 'remove',
+    label: 'Remove',
+    viewBox: '0 0 448 512',
+    iconPaths: `
+        <path d="M163.8 0c-12.1 0-23.2 6.8-28.6 17.7L128 32H32C14.3 32 0 46.3 0 64s14.3 32 32 32h384c17.7 0 32-14.3 32-32s-14.3-32-32-32h-96l-7.2-14.3A31.9 31.9 0 0 0 284.2 0z" fill="currentColor"></path>
+        <path d="M416 96H32v352c0 35.3 28.7 64 64 64h256c35.3 0 64-28.7 64-64zm-272 80v224c0 8.8-7.2 16-16 16s-16-7.2-16-16V176c0-8.8 7.2-16 16-16s16 7.2 16 16m96 0v224c0 8.8-7.2 16-16 16s-16-7.2-16-16V176c0-8.8 7.2-16 16-16s16 7.2 16 16m96 0v224c0 8.8-7.2 16-16 16s-16-7.2-16-16V176c0-8.8 7.2-16 16-16s16 7.2 16 16" fill="currentColor" opacity="0.4"></path>`,
+});
+const HARDCOVER_STATUS_PLACEHOLDER = Object.freeze({
+    key: 'unset',
+    label: '',
+    viewBox: '0 0 448 512',
+    iconPaths: `
+        <path d="M96 0C60.7 0 32 28.7 32 64v384c0 35.3 28.7 64 64 64h256c35.3 0 64-28.7 64-64V160H288c-17.7 0-32-14.3-32-32V0zm144 0v128h128z" fill="currentColor" opacity="0.25"></path>
+        <path d="M256 232c13.3 0 24 10.7 24 24v40h40c13.3 0 24 10.7 24 24s-10.7 24-24 24h-40v40c0 13.3-10.7 24-24 24s-24-10.7-24-24v-40h-40c-13.3 0-24-10.7-24-24s10.7-24 24-24h40v-40c0-13.3 10.7-24 24-24z" fill="currentColor"></path>`,
+});
 const UPLOAD_AMOUNT_STEP = 50;
 const UPLOAD_AMOUNT_MIN = 50;
 const UPLOAD_AMOUNT_MAX = 200;
@@ -44,6 +132,7 @@ const HAPTIC_PATTERNS = Object.freeze({
     light: 10,
     search: [20, 35, 20],
     accordion: 12,
+    close: [12, 24, 12],
     menu: 20,
     tab: 12,
     save: [20, 45, 20],
@@ -91,6 +180,14 @@ function triggerHaptic(pattern = 'tap') {
     } catch (_) {
         // Ignore haptic errors so UI interactions are never blocked.
     }
+}
+
+function bindHapticClick(selector, pattern = 'tap') {
+    document.querySelectorAll(selector).forEach((element) => {
+        element.addEventListener('click', () => {
+            triggerHaptic(pattern);
+        });
+    });
 }
 
 function getTomSelectValues(instance) {
@@ -299,6 +396,1374 @@ function formatDuration(seconds) {
         }
     }
     return result.slice(0, 2).join(' ');
+}
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[char]));
+}
+
+function arrayFromValue(value) {
+    if (!value) return [];
+    if (Array.isArray(value)) return value.filter(Boolean);
+    if (typeof value === 'object') return Object.values(value).filter(Boolean);
+    return [value];
+}
+
+function firstListedName(value) {
+    const first = arrayFromValue(value).map(item => String(item).trim()).find(Boolean) || '';
+    return first.split(',').map(part => part.trim()).find(Boolean) || '';
+}
+
+function updateResultJsonData(resultItem, patch) {
+    if (!resultItem) return;
+    let data = {};
+    try {
+        data = JSON.parse(resultItem.dataset.json || '{}');
+    } catch (_) {
+        data = {};
+    }
+    resultItem.dataset.json = JSON.stringify({ ...data, ...patch });
+}
+
+function hardcoverCoverUrlFromResultItem(resultItem) {
+    if (!resultItem) return '';
+    try {
+        const data = JSON.parse(resultItem.dataset.json || '{}');
+        return data?.hardcover_enrichment?.hardcover?.cover_image || '';
+    } catch (_) {
+        return '';
+    }
+}
+
+function handleResultThumbnailError(imgElement) {
+    if (!imgElement) return;
+    const resultItem = imgElement.closest('.result-item');
+    const hardcoverCoverUrl = hardcoverCoverUrlFromResultItem(resultItem);
+    if (hardcoverCoverUrl && imgElement.dataset.triedHardcoverCover !== 'true') {
+        imgElement.dataset.triedHardcoverCover = 'true';
+        if (resultItem) resultItem.dataset.hasMamCover = 'false';
+        imgElement.src = `/proxy_thumbnail?url=${encodeURIComponent(hardcoverCoverUrl)}`;
+        return;
+    }
+
+    imgElement.onerror = null;
+    imgElement.src = '/static/icons/no_cover.png';
+}
+
+window.handleResultThumbnailError = handleResultThumbnailError;
+
+function hardcoverUrl(metadata) {
+    const slug = String(metadata?.slug || '').trim();
+    if (!slug) return '';
+    const rawPath = String(metadata?.url_path || '').trim().toLowerCase();
+    const objectType = String(metadata?.object_type || '').trim().toLowerCase();
+    const path = ['books', 'series', 'authors'].includes(rawPath)
+        ? rawPath
+        : objectType === 'series'
+            ? 'series'
+            : objectType === 'author'
+                ? 'authors'
+                : 'books';
+    return `https://hardcover.app/${path}/${encodeURIComponent(slug)}`;
+}
+
+function normalizeHardcoverUserBook(userBook) {
+    if (!userBook || typeof userBook !== 'object') return null;
+    const id = Number(userBook.id);
+    const statusId = Number(userBook.status_id ?? userBook.statusId);
+    if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(statusId) || statusId <= 0) return null;
+
+    const editionId = Number(userBook.edition_id ?? userBook.editionId);
+    const privacySettingId = Number(userBook.privacy_setting_id ?? userBook.privacySettingId);
+    const userId = Number(userBook.user_id ?? userBook.userId);
+    const rating = userBook.rating == null || userBook.rating === '' ? null : Number(userBook.rating);
+    const bookId = Number(userBook.book_id ?? userBook.bookId);
+
+    return {
+        id,
+        book_id: Number.isFinite(bookId) && bookId > 0 ? bookId : null,
+        edition_id: Number.isFinite(editionId) && editionId > 0 ? editionId : null,
+        user_id: Number.isFinite(userId) && userId > 0 ? userId : null,
+        status_id: statusId,
+        status: String(userBook.status || userBook.label || '').trim(),
+        privacy_setting_id: Number.isFinite(privacySettingId) && privacySettingId > 0 ? privacySettingId : 1,
+        rating: Number.isFinite(rating) ? rating : null,
+        updated_at: String(userBook.updated_at ?? userBook.updatedAt ?? '').trim(),
+    };
+}
+
+function hardcoverStatusDefinition(statusId) {
+    return HARDCOVER_STATUS_BY_ID.get(Number(statusId)) || null;
+}
+
+function renderHardcoverStatusIcon(statusDef, extraClass = '') {
+    if (!statusDef) return '';
+    return `
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="${statusDef.viewBox}"
+            class="hardcover-status-icon${extraClass ? ` ${extraClass}` : ''}" aria-hidden="true">
+            ${statusDef.iconPaths}
+        </svg>`;
+}
+
+function renderHardcoverStatusPicker(metadata, { torrentId = '', variant = 'compact' } = {}) {
+    const userBook = normalizeHardcoverUserBook(metadata?.user_book);
+    const userBookKnown = metadata?.user_book_known === true || metadata?.user_book_known === 'true' || !!userBook;
+    const objectType = String(metadata?.object_type || '').trim().toLowerCase();
+    const bookId = Number(metadata?.book_id);
+    const currentStatusId = Number(userBook?.status_id || 0);
+    const statusDef = hardcoverStatusDefinition(currentStatusId) || HARDCOVER_STATUS_PLACEHOLDER;
+    const isPending = hardcoverPendingStatusBookIds.has(bookId);
+    if (objectType !== 'book' || !Number.isFinite(bookId) || bookId <= 0) return '';
+
+    const safeTorrentId = String(torrentId || '').trim();
+    const safeTitle = String(metadata?.title || 'this book').trim() || 'this book';
+    const statusLabel = String(statusDef.label || '').trim();
+    const optionsHtml = HARDCOVER_STATUS_OPTIONS.map((option) => `
+        <button type="button"
+            class="hardcover-status-option${option.statusId === currentStatusId ? ' is-active' : ''}"
+            data-hardcover-status-option="${option.statusId}" role="menuitemradio"
+            aria-checked="${option.statusId === currentStatusId ? 'true' : 'false'}">
+            <span class="hardcover-status-option__iconbox hardcover-status--${option.key}">
+                ${renderHardcoverStatusIcon(option)}
+            </span>
+            <span class="hardcover-status-option__label">${escapeHtml(option.label)}</span>
+            ${option.statusId === currentStatusId ? '<span class="hardcover-status-option__dot" aria-hidden="true"></span>' : ''}
+        </button>`).join('');
+    const removeHtml = userBook && currentStatusId > 0 ? `
+        <div class="hardcover-status-menu__footer">
+            <button type="button"
+                class="hardcover-status-option hardcover-status-option--remove"
+                data-hardcover-status-remove="true"
+                role="menuitem">
+                <span class="hardcover-status-option__iconbox hardcover-status--remove">
+                    ${renderHardcoverStatusIcon(HARDCOVER_REMOVE_ACTION)}
+                </span>
+                <span class="hardcover-status-option__label">${escapeHtml(HARDCOVER_REMOVE_ACTION.label)}</span>
+            </button>
+        </div>` : '';
+
+    return `
+        <div class="hardcover-status-picker hardcover-status-picker--${escapeHtml(variant)}"
+            data-hardcover-status-picker
+            data-book-id="${bookId}"
+            data-torrent-id="${escapeHtml(safeTorrentId)}"
+            data-current-status-id="${currentStatusId}"
+            data-user-book-known="${userBookKnown ? 'true' : 'false'}"
+            data-busy="${isPending ? 'true' : 'false'}">
+            <button type="button"
+                class="hardcover-status-trigger hardcover-status--${escapeHtml(statusDef.key)}${isPending ? ' is-pending' : ''}"
+                data-hardcover-status-toggle
+                aria-haspopup="menu"
+                aria-expanded="false"
+                aria-label="Change Hardcover status for ${escapeHtml(safeTitle)}"
+                aria-busy="${isPending ? 'true' : 'false'}"
+                ${isPending ? 'disabled' : ''}>
+                ${renderHardcoverStatusIcon(statusDef)}
+                ${statusLabel ? `<span class="hardcover-status-trigger__label">${escapeHtml(statusLabel)}</span>` : ''}
+                <i class="bi bi-chevron-down hardcover-status-trigger__caret" aria-hidden="true"></i>
+            </button>
+            <div class="hardcover-status-menu" role="menu">
+                ${optionsHtml}
+                ${removeHtml}
+            </div>
+        </div>`;
+}
+
+function getResultItemHardcoverData(resultItem) {
+    if (!resultItem) return null;
+    try {
+        return JSON.parse(resultItem.dataset.json || '{}');
+    } catch (_) {
+        return null;
+    }
+}
+
+function updateHardcoverUserBookStateForResultItem(resultItem, userBook, { userBookKnown = true } = {}) {
+    const data = getResultItemHardcoverData(resultItem);
+    const normalizedUserBook = normalizeHardcoverUserBook(userBook);
+    const enrichment = data?.hardcover_enrichment;
+    if (!data || !enrichment?.hardcover) return false;
+
+    const hardcover = enrichment.hardcover;
+    if (String(hardcover.object_type || '').trim().toLowerCase() !== 'book') return false;
+    hardcover.user_book = normalizedUserBook;
+    hardcover.user_book_known = !!userBookKnown;
+    resultItem.dataset.json = JSON.stringify(data);
+
+    const container = resultItem.querySelector('[data-hardcover-container]');
+    if (container) {
+        container.innerHTML = renderHardcoverMetadata(enrichment, {
+            torrentId: String(resultItem.dataset.torrentId || ''),
+        });
+    }
+    return true;
+}
+
+function syncHardcoverUserBookStatus(bookId, userBook, { userBookKnown = true } = {}) {
+    const normalizedBookId = Number(bookId);
+    const normalizedUserBook = normalizeHardcoverUserBook(userBook);
+    if (!Number.isFinite(normalizedBookId) || normalizedBookId <= 0) return;
+
+    document.querySelectorAll('.result-item[data-json]').forEach(resultItem => {
+        const data = getResultItemHardcoverData(resultItem);
+        const matchedBookId = Number(data?.hardcover_enrichment?.hardcover?.book_id);
+        if (matchedBookId === normalizedBookId) {
+            updateHardcoverUserBookStateForResultItem(resultItem, normalizedUserBook, { userBookKnown });
+        }
+    });
+
+    const bookModalEl = document.getElementById('bookDetailsModal');
+    const currentTorrentId = String(bookModalEl?.dataset.currentTorrentId || '').trim();
+    if (!bookModalEl || !bookModalEl.classList.contains('show') || !currentTorrentId) return;
+
+    const escapedTorrentId = window.CSS && CSS.escape
+        ? CSS.escape(currentTorrentId)
+        : currentTorrentId.replace(/["\\]/g, '\\$&');
+    const activeRow = document.querySelector(`.result-item[data-torrent-id="${escapedTorrentId}"]`);
+    const activeData = getResultItemHardcoverData(activeRow);
+    const activeBookId = Number(activeData?.hardcover_enrichment?.hardcover?.book_id);
+    if (activeBookId === normalizedBookId) {
+        renderBookDetailsHardcover(activeData.hardcover_enrichment);
+    }
+}
+
+function setHardcoverStatusPending(bookId, isPending) {
+    const normalizedBookId = Number(bookId);
+    if (!Number.isFinite(normalizedBookId) || normalizedBookId <= 0) return;
+    if (isPending) {
+        hardcoverPendingStatusBookIds.add(normalizedBookId);
+    } else {
+        hardcoverPendingStatusBookIds.delete(normalizedBookId);
+    }
+
+    document.querySelectorAll(`[data-hardcover-status-picker][data-book-id="${normalizedBookId}"]`).forEach((picker) => {
+        picker.dataset.busy = isPending ? 'true' : 'false';
+        const toggle = picker.querySelector('[data-hardcover-status-toggle]');
+        if (!toggle) return;
+        toggle.disabled = !!isPending;
+        toggle.setAttribute('aria-busy', isPending ? 'true' : 'false');
+        toggle.classList.toggle('is-pending', !!isPending);
+    });
+}
+
+function renderStarRating(rating, ratingsCount, { hideCountOnMobile = false, countOverride = null, countLinkUrl = '', wrapWithLink = false } = {}) {
+    if (!Number.isFinite(rating) || rating <= 0) return '';
+    const clamped = Math.max(0, Math.min(5, rating));
+    const stars = Array.from({ length: 5 }, (_, index) => {
+        const fill = Math.max(0, Math.min(1, clamped - index)) * 100;
+        return `
+            <span class="hardcover-star position-relative d-inline-block" aria-hidden="true"
+                style="width: 1em; height: 1em; line-height: 1;">
+                <span class="text-body-secondary opacity-50">★</span>
+                <span class="position-absolute top-0 start-0 overflow-hidden text-warning"
+                    style="width: ${fill.toFixed(0)}%;">★</span>
+            </span>`;
+    }).join('');
+
+    const count = Number(countOverride ?? ratingsCount);
+    let countHtml = '';
+    if (count > 0) {
+        const countClasses = `opacity-50 fw-normal${hideCountOnMobile ? ' hardcover-review-count-mobile-hide' : ''}`;
+        countHtml = countLinkUrl && !wrapWithLink
+            ? `&emsp;<a href="${escapeHtml(countLinkUrl)}" target="_blank" rel="noopener noreferrer" class="${countClasses} link-secondary text-decoration-none hover-primary">(${count.toLocaleString()})</a>`
+            : `&emsp;<span class="${countClasses}">(${count.toLocaleString()})</span>`;
+    }
+
+    const content = `
+        <div class="hardcover-rating d-flex align-items-center gap-1 text-body-secondary">
+            <span class="d-inline-flex" role="img" aria-label="${clamped.toFixed(1)} out of 5 stars">${stars}</span>
+            <span class="fw-medium">${clamped.toFixed(1)}${countHtml}</span>
+        </div>`;
+
+    if (countLinkUrl && wrapWithLink) {
+        return `<a href="${escapeHtml(countLinkUrl)}" target="_blank" rel="noopener noreferrer" class="text-decoration-none hover-primary d-inline-block">${content}</a>`;
+    }
+
+    return content;
+}
+
+function renderHardcoverTitleHtml(metadata) {
+    const title = String(metadata?.title || '').trim();
+    if (!title) return '';
+    const url = hardcoverUrl(metadata);
+    return url
+        ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="link-body-emphasis text-decoration-none hover-primary">${escapeHtml(title)}</a>`
+        : escapeHtml(title);
+}
+
+function renderHardcoverAuthorHtml(metadata) {
+    const authors = arrayFromValue(metadata?.authors).map((value) => String(value || '').trim()).filter(Boolean);
+    if (!authors.length) return '';
+
+    const authorSlugs = Array.isArray(metadata?.author_slugs) ? metadata.author_slugs : [];
+    return authors.map((authorName, index) => {
+        const authorUrl = hardcoverAuthorLink(authorSlugs[index]);
+        return authorUrl
+            ? `<a href="${escapeHtml(authorUrl)}" target="_blank" rel="noopener noreferrer" class="link-body-emphasis text-decoration-none hover-primary">${escapeHtml(authorName)}</a>`
+            : escapeHtml(authorName);
+    }).join(', ');
+}
+
+function renderHardcoverSeriesHtml(metadata) {
+    const featuredSeries = metadata?.featured_series;
+    if (featuredSeries && typeof featuredSeries === 'object') {
+        const name = String(featuredSeries.name || featuredSeries?.series?.name || '').trim();
+        const position = Number(featuredSeries.position);
+        if (name) {
+            const label = Number.isFinite(position) && position > 0 ? `${name} #${position}` : name;
+            const url = hardcoverSeriesLink(featuredSeries.slug || featuredSeries?.series?.slug);
+            return url
+                ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="link-body-emphasis text-decoration-none hover-primary">${escapeHtml(label)}</a>`
+                : escapeHtml(label);
+        }
+    }
+
+    const firstSeries = uniqueHardcoverStrings(metadata?.series_names)[0] || '';
+    return firstSeries ? escapeHtml(firstSeries) : '';
+}
+
+function renderHardcoverMetadata(enrichment, { torrentId = '' } = {}) {
+    const metadata = enrichment?.hardcover;
+
+    if (!metadata) {
+        const reason = enrichment?.failure_reason || 'unresolved';
+        let displayMessage = 'No match';
+        if (reason === 'http_401' || reason === 'http_403') {
+            displayMessage = 'Auth error';
+        }
+
+        return `
+            <div class="hardcover-match hardcover-match--static d-flex flex-column gap-1 text-decoration-none pe-none">
+                <div class="d-flex align-items-center gap-1 text-body-secondary" style="font-size: 0.7rem;">
+                    <img src="${HARDCOVER_LOGO_URL}" alt="" style="width: 0.8rem; height: 0.8rem; object-fit: contain;" loading="lazy">
+                    <span class="text-uppercase fw-semibold" style="letter-spacing: 0.05em;">Hardcover</span>
+                </div>
+                <div style="font-size: 0.8rem;">${displayMessage}</div>
+            </div>`;
+    }
+
+    const rating = Number(metadata.rating);
+    const hasRating = Number.isFinite(rating) && rating > 0;
+    const publishedText = formatHardcoverPublishedText(metadata, { preferYearOnly: true });
+    const author = firstListedName(metadata.authors);
+    const title = metadata.title || 'Unknown Title';
+    const tooltipText = `<div class='text-start'><strong>Title:</strong> ${escapeHtml(title)}<br><strong>Author:</strong> ${escapeHtml(author)}</div>`;
+    const url = hardcoverUrl(metadata);
+    const tagName = url ? 'a' : 'div';
+    const linkAttrs = (url ? `href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" ` : '') +
+        `data-bs-toggle="tooltip" data-bs-html="true" title="${escapeHtml(tooltipText)}"`;
+    const statusHtml = renderHardcoverStatusPicker(metadata, { torrentId, variant: 'compact' });
+
+    return `
+        <div class="hardcover-match hardcover-match--linked d-flex flex-column gap-2">
+            <${tagName} class="hardcover-match__content text-decoration-none ${url ? '' : 'pe-none'}" ${linkAttrs}>
+                <div class="d-flex align-items-center gap-1 text-body-secondary" style="font-size: 0.7rem;">
+                    <img src="${HARDCOVER_LOGO_URL}" alt="" style="width: 0.8rem; height: 0.8rem; object-fit: contain;" loading="lazy">
+                    <span class="text-uppercase fw-semibold" style="letter-spacing: 0.05em;">Hardcover</span>
+                </div>
+                ${hasRating ? `<div>${renderStarRating(rating, metadata.ratings_count, { hideCountOnMobile: true })}</div>` : ''}
+                ${publishedText ? `<div class="text-body-secondary hardcover-mobile-hide" style="font-size: 0.8rem;">Published ${escapeHtml(publishedText)}</div>` : ''}
+            </${tagName}>
+            ${statusHtml}
+        </div>`;
+}
+
+function formatHardcoverDate(value) {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    if (/^\d{4}$/.test(text)) return text;
+    const parsed = /^\d{4}-\d{2}-\d{2}$/.test(text)
+        ? new Date(`${text}T12:00:00`)
+        : new Date(text);
+    if (!Number.isNaN(parsed.getTime())) {
+        return parsed.toLocaleDateString(undefined, {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric'
+        });
+    }
+    return text;
+}
+
+function formatHardcoverPublishedText(metadata, { preferYearOnly = false } = {}) {
+    const objectType = String(metadata?.object_type || '').trim().toLowerCase();
+    const releaseDate = String(metadata?.release_date || '').trim();
+    const hasYear = !!metadata?.release_year;
+
+    if (objectType === 'series' && releaseDate) {
+        const parts = releaseDate.split(/\s+to\s+/i).map((part) => {
+            const yearMatch = String(part || '').trim().match(/^(\d{4})/);
+            return yearMatch ? yearMatch[1] : formatHardcoverDate(part);
+        }).filter(Boolean);
+        if (parts.length >= 2) {
+            return `${parts[0]} - ${parts[parts.length - 1]}`;
+        }
+        if (parts.length === 1) {
+            return parts[0];
+        }
+    }
+
+    if (preferYearOnly && hasYear) {
+        return String(metadata.release_year);
+    }
+
+    return formatHardcoverDate(releaseDate) || (hasYear ? String(metadata.release_year) : '');
+}
+
+function formatHardcoverCount(value) {
+    const count = Number(value);
+    if (!Number.isFinite(count) || count < 0) return '';
+    return count.toLocaleString();
+}
+
+function uniqueHardcoverStrings(values) {
+    if (!Array.isArray(values)) return [];
+    const seen = new Set();
+    const items = [];
+    values.forEach((value) => {
+        const text = String(value || '').trim();
+        if (!text || seen.has(text)) return;
+        seen.add(text);
+        items.push(text);
+    });
+    return items;
+}
+
+function hardcoverSeriesLabel(metadata) {
+    const featuredSeries = metadata?.featured_series;
+    if (featuredSeries && typeof featuredSeries === 'object') {
+        const name = String(featuredSeries.name || featuredSeries?.series?.name || '').trim();
+        const position = Number(featuredSeries.position);
+        if (name) {
+            return Number.isFinite(position) && position > 0 ? `${name} #${position}` : name;
+        }
+    }
+    return uniqueHardcoverStrings(metadata?.series_names)[0] || '';
+}
+
+function renderHardcoverBadges(values, limit = 6) {
+    return uniqueHardcoverStrings(values)
+        .slice(0, limit)
+        .map((value) => `<span class="badge rounded-pill bg-secondary-subtle text-secondary-emphasis border fw-normal">${escapeHtml(value)}</span>`)
+        .join('');
+}
+
+function currentDetailItemSupportsPages() {
+    const bookModalEl = document.getElementById('bookDetailsModal');
+    const mainCat = String(bookModalEl?.dataset.currentMainCat || '').trim();
+    const filetype = String(bookModalEl?.dataset.currentFiletype || '').trim().toLowerCase();
+
+    if (mainCat === '13') return false;
+    if (!filetype) return true;
+
+    return !/\b(mp3|m4b|m4a|aac|flac|ogg|opus|aax|audio)\b/.test(filetype);
+}
+
+let detailColumnBalanceFrame = 0;
+
+function normalizeCollapsedHeight(value, fallback = 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getExpandableDefaultCollapsedHeight(element, fallback = 0) {
+    return normalizeCollapsedHeight(element?.dataset.collapsedHeight, fallback);
+}
+
+function getExpandableActiveCollapsedHeight(element) {
+    return normalizeCollapsedHeight(
+        element?.dataset.activeCollapsedHeight,
+        normalizeCollapsedHeight(element?.dataset.defaultCollapsedHeight, 0)
+    );
+}
+
+function syncExpandableBalanceState(element) {
+    if (!element) return;
+    const isBalancedOpen = element.classList.contains('is-collapsible')
+        && !element.classList.contains('is-expanded')
+        && element.scrollHeight <= getExpandableActiveCollapsedHeight(element) + 1;
+    element.classList.toggle('is-balanced-open', isBalancedOpen);
+    if (element.classList.contains('is-expanded') || isBalancedOpen || !element.classList.contains('is-collapsible')) {
+        element.removeAttribute('role');
+        element.tabIndex = -1;
+        element.title = '';
+    } else {
+        element.setAttribute('role', 'button');
+        element.tabIndex = 0;
+        element.title = 'Click to expand';
+    }
+}
+
+function setExpandableCollapsedHeight(element, height) {
+    if (!element) return;
+    const nextHeight = Math.max(0, Math.ceil(normalizeCollapsedHeight(height, 0)));
+    element.dataset.activeCollapsedHeight = String(nextHeight);
+    element.style.setProperty('--detail-collapsed-max-height', `${nextHeight}px`);
+    syncExpandableBalanceState(element);
+}
+
+function initializeExpandableCollapsedHeight(element, fallback = 0) {
+    if (!element) return 0;
+    const defaultHeight = getExpandableDefaultCollapsedHeight(element, fallback);
+    element.dataset.defaultCollapsedHeight = String(defaultHeight);
+    setExpandableCollapsedHeight(element, defaultHeight);
+    return defaultHeight;
+}
+
+function resetExpandableCollapsedHeight(element) {
+    if (!element) return;
+    const defaultHeight = normalizeCollapsedHeight(element.dataset.defaultCollapsedHeight, 0);
+    if (!defaultHeight) return;
+    setExpandableCollapsedHeight(element, defaultHeight);
+}
+
+function isBookDetailsDesktopColumnsVisible() {
+    const leftColumn = document.getElementById('detail-primary-column');
+    const rightColumn = document.getElementById('detail-secondary-column');
+    const leftContent = document.getElementById('detail-primary-column-content');
+    const rightContent = document.getElementById('detail-secondary-column-content');
+    if (!leftColumn || !rightColumn || !leftContent || !rightContent) return false;
+    if (window.matchMedia && !window.matchMedia('(min-width: 992px)').matches) return false;
+
+    const leftRect = leftColumn.getBoundingClientRect();
+    const rightRect = rightColumn.getBoundingClientRect();
+    const leftContentRect = leftContent.getBoundingClientRect();
+    const rightContentRect = rightContent.getBoundingClientRect();
+    if (leftRect.width <= 0 || rightRect.width <= 0) return false;
+    if (leftContentRect.width <= 0 || rightContentRect.width <= 0) return false;
+
+    return Math.abs(leftRect.top - rightRect.top) < 8;
+}
+
+function balanceBookDetailsColumns() {
+    const bookModalEl = document.getElementById('bookDetailsModal');
+    const leftColumn = document.getElementById('detail-primary-column-content');
+    const rightColumn = document.getElementById('detail-secondary-column-content');
+    if (!bookModalEl || !leftColumn || !rightColumn) return;
+
+    const candidates = [
+        ...leftColumn.querySelectorAll('[data-balance-expandable="true"]'),
+        ...rightColumn.querySelectorAll('[data-balance-expandable="true"]'),
+    ];
+
+    candidates.forEach((element) => {
+        if (!element.classList.contains('is-expanded')) {
+            resetExpandableCollapsedHeight(element);
+        } else {
+            syncExpandableBalanceState(element);
+        }
+    });
+
+    if (!bookModalEl.classList.contains('show') || !isBookDetailsDesktopColumnsVisible()) {
+        return;
+    }
+
+    const tolerance = 4;
+    const leftHeight = leftColumn.getBoundingClientRect().height;
+    const rightHeight = rightColumn.getBoundingClientRect().height;
+    if (Math.abs(leftHeight - rightHeight) <= tolerance) return;
+
+    const shorterColumn = leftHeight < rightHeight ? leftColumn : rightColumn;
+    const tallerHeight = Math.max(leftHeight, rightHeight);
+    const shorterCandidates = [...shorterColumn.querySelectorAll('[data-balance-expandable="true"]')]
+        .filter((element) => (
+            element.classList.contains('is-collapsible')
+            && !element.classList.contains('is-expanded')
+            && element.getClientRects().length
+        ));
+
+    shorterCandidates.forEach((element) => {
+        const shortage = tallerHeight - shorterColumn.getBoundingClientRect().height;
+        if (shortage <= tolerance) return;
+
+        const currentHeight = getExpandableActiveCollapsedHeight(element);
+        const availableGrowth = Math.max(0, element.scrollHeight - currentHeight);
+        if (availableGrowth <= tolerance) {
+            syncExpandableBalanceState(element);
+            return;
+        }
+
+        setExpandableCollapsedHeight(element, currentHeight + Math.min(shortage, availableGrowth));
+    });
+}
+
+function scheduleBookDetailsColumnBalance() {
+    if (detailColumnBalanceFrame) cancelAnimationFrame(detailColumnBalanceFrame);
+    detailColumnBalanceFrame = requestAnimationFrame(() => {
+        detailColumnBalanceFrame = 0;
+        balanceBookDetailsColumns();
+    });
+}
+
+function configureExpandableTextBlock(element, {
+    html,
+    text,
+    collapsedHeight,
+    preserveExpanded = false,
+    onExpand = null,
+} = {}) {
+    if (!element) return;
+
+    if (html !== undefined) {
+        element.dataset.expandableHtml = String(html || '');
+        element.innerHTML = html;
+    } else if (text !== undefined) {
+        element.textContent = String(text || '');
+    }
+
+    const defaultCollapsedHeight = initializeExpandableCollapsedHeight(element, collapsedHeight);
+    element.classList.remove('is-expanded', 'is-collapsible', 'is-balanced-open');
+    element.setAttribute('aria-expanded', 'false');
+    element.removeAttribute('role');
+    element.tabIndex = -1;
+    element.title = '';
+    element.onclick = null;
+    element.onkeydown = null;
+
+    const hasContent = String(element.textContent || '').trim().length > 0;
+    if (!hasContent) return;
+    if (!element.getClientRects().length) return;
+
+    const isCollapsible = element.scrollHeight > defaultCollapsedHeight + 1;
+    if (!isCollapsible) return;
+
+    element.classList.add('is-collapsible');
+    if (preserveExpanded) {
+        element.classList.add('is-expanded');
+        element.setAttribute('aria-expanded', 'true');
+        syncExpandableBalanceState(element);
+        return;
+    }
+
+    element.setAttribute('role', 'button');
+    element.setAttribute('aria-expanded', 'false');
+    element.tabIndex = 0;
+    syncExpandableBalanceState(element);
+    element.onclick = (event) => {
+        if (element.classList.contains('is-expanded') || element.classList.contains('is-balanced-open')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        element.classList.add('is-expanded');
+        element.classList.remove('is-balanced-open');
+        element.setAttribute('aria-expanded', 'true');
+        element.title = '';
+        if (typeof onExpand === 'function') onExpand(element);
+    };
+    element.onkeydown = (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        element.click();
+    };
+}
+
+function configureExpandableDetailDescription(element, html) {
+    configureExpandableTextBlock(element, {
+        html,
+        collapsedHeight: 350,
+        onExpand: () => scheduleBookDetailsColumnBalance(),
+    });
+}
+
+function configureExpandableHardcoverDescription(element, text, preserveExpanded = false) {
+    configureExpandableTextBlock(element, {
+        text,
+        collapsedHeight: 96,
+        preserveExpanded,
+        onExpand: () => {
+            const bookModalEl = document.getElementById('bookDetailsModal');
+            if (bookModalEl) bookModalEl.dataset.hardcoverDescriptionExpanded = 'true';
+            scheduleBookDetailsColumnBalance();
+        },
+    });
+}
+
+function clearHardcoverSeriesStrip() {
+    const section = document.getElementById('detail-hc-series-strip-section');
+    const meta = document.getElementById('detail-hc-series-strip-meta');
+    const strip = document.getElementById('detail-hc-series-strip');
+    if (meta) meta.textContent = '';
+    if (strip) strip.innerHTML = '';
+    if (section) section.classList.add('d-none');
+}
+
+function hardcoverSeriesLink(slug) {
+    const normalized = String(slug || '').trim();
+    return normalized ? `https://hardcover.app/series/${encodeURIComponent(normalized)}` : '';
+}
+
+function hardcoverBookLink(slug) {
+    const normalized = String(slug || '').trim();
+    return normalized ? `https://hardcover.app/books/${encodeURIComponent(normalized)}` : '';
+}
+
+function hardcoverReviewsLink(slug) {
+    const normalized = String(slug || '').trim();
+    return normalized ? `https://hardcover.app/books/${encodeURIComponent(normalized)}/reviews` : '';
+}
+
+function hardcoverAuthorLink(slug) {
+    const normalized = String(slug || '').trim();
+    return normalized ? `https://hardcover.app/authors/${encodeURIComponent(normalized)}` : '';
+}
+
+function buildMouseSearchUrlForTitle(title) {
+    const normalizedTitle = String(title || '').trim();
+    if (!normalizedTitle) {
+        return window.location.pathname || '/';
+    }
+
+    const searchForm = document.getElementById('search-form');
+    const params = searchForm
+        ? new URLSearchParams(new FormData(searchForm))
+        : new URLSearchParams(window.location.search);
+
+    params.set('query', normalizedTitle);
+    params.set('search_in_title', 'on');
+    [
+        'search_in_author',
+        'search_in_series',
+        'search_in_narrator',
+        'search_in_description',
+        'search_in_tags',
+        'search_in_filenames'
+    ].forEach((key) => params.delete(key));
+
+    const queryString = params.toString();
+    return queryString ? `${window.location.pathname}?${queryString}` : (window.location.pathname || '/');
+}
+
+function formatHardcoverSeriesPosition(value) {
+    const position = Number(value);
+    if (!Number.isFinite(position)) return '';
+    return Number.isInteger(position) ? `#${position}` : `#${position.toString().replace(/\.0+$/, '')}`;
+}
+
+function normalizeHardcoverSeriesPosition(value) {
+    const position = Number(value);
+    return Number.isFinite(position) ? position : null;
+}
+
+function isPrimaryHardcoverSeriesPosition(value) {
+    const position = normalizeHardcoverSeriesPosition(value);
+    if (position === null) return false;
+    const doubled = position * 2;
+    return Math.abs(doubled - Math.round(doubled)) < 0.0001;
+}
+
+function filterHardcoverSeriesEntries(entries, currentBookId, currentPosition) {
+    const list = Array.isArray(entries) ? entries : [];
+    const bookIdKey = String(currentBookId || '').trim();
+    const currentIsPrimaryLane = currentPosition === null || isPrimaryHardcoverSeriesPosition(currentPosition);
+    if (!currentIsPrimaryLane) {
+        return list;
+    }
+
+    const filtered = list.filter((entry) => {
+        const entryBookId = String(entry?.book?.id || '').trim();
+        if (bookIdKey && entryBookId === bookIdKey) {
+            return true;
+        }
+        const position = normalizeHardcoverSeriesPosition(entry?.position);
+        return position === null || isPrimaryHardcoverSeriesPosition(position);
+    });
+
+    return filtered.length ? filtered : list;
+}
+
+function scrollHardcoverSeriesStripToCurrent(strip) {
+    if (!strip) return;
+    const currentCard = strip.querySelector('.hardcover-series-card--current');
+    if (!currentCard) return;
+
+    const stripRect = strip.getBoundingClientRect();
+    const cardRect = currentCard.getBoundingClientRect();
+    const isFullyVisible = cardRect.left >= stripRect.left && cardRect.right <= stripRect.right;
+    if (isFullyVisible) return;
+
+    const centeredLeft = currentCard.offsetLeft - Math.max(0, (strip.clientWidth - currentCard.offsetWidth) / 2);
+    strip.scrollTo({
+        left: Math.max(0, centeredLeft),
+        behavior: 'smooth',
+    });
+}
+
+function renderHardcoverSeriesStrip(series, currentBookId, currentPosition) {
+    const section = document.getElementById('detail-hc-series-strip-section');
+    const meta = document.getElementById('detail-hc-series-strip-meta');
+    const strip = document.getElementById('detail-hc-series-strip');
+    if (!section || !meta || !strip) return;
+
+    const entries = filterHardcoverSeriesEntries(series?.book_series, currentBookId, currentPosition);
+    if (!entries.length) {
+        clearHardcoverSeriesStrip();
+        return;
+    }
+
+    const seriesName = String(series?.name || '').trim();
+    const authorName = String(series?.author?.name || '').trim();
+    const authorUrl = hardcoverAuthorLink(series?.author?.slug);
+    const seriesUrl = hardcoverSeriesLink(series?.slug);
+    if (seriesUrl && seriesName) {
+        meta.innerHTML = `<a href="${escapeHtml(seriesUrl)}" target="_blank" rel="noopener noreferrer" class="link-secondary text-decoration-none hover-primary">${escapeHtml(seriesName)}</a>${authorName ? ` <span class="text-body-secondary">by </span>${authorUrl ? `<a href="${escapeHtml(authorUrl)}" target="_blank" rel="noopener noreferrer" class="link-secondary text-decoration-none hover-primary">${escapeHtml(authorName)}</a>` : `<span class="text-body-secondary">${escapeHtml(authorName)}</span>`}` : ''}`;
+    } else {
+        meta.innerHTML = authorName
+            ? `${escapeHtml(seriesName)} <span class="text-body-secondary">by </span>${authorUrl ? `<a href="${escapeHtml(authorUrl)}" target="_blank" rel="noopener noreferrer" class="link-secondary text-decoration-none hover-primary">${escapeHtml(authorName)}</a>` : `<span class="text-body-secondary">${escapeHtml(authorName)}</span>`}`
+            : escapeHtml(seriesName);
+    }
+
+    const currentBookKey = String(currentBookId || '').trim();
+    strip.innerHTML = entries.map((entry) => {
+        const book = entry?.book || {};
+        const bookId = String(book.id || '').trim();
+        const title = String(book.title || '').trim() || 'Unknown title';
+        const slug = String(book.slug || '').trim();
+        const hardcoverUrl = hardcoverBookLink(slug);
+        const mouseSearchUrl = buildMouseSearchUrlForTitle(title);
+        const coverUrl = String(book.image_url || '').trim();
+        const proxyCoverUrl = coverUrl ? `/proxy_thumbnail?url=${encodeURIComponent(coverUrl)}` : '/static/icons/no_cover.png';
+        const positionLabel = formatHardcoverSeriesPosition(entry?.position);
+        const releaseYear = String(book.release_year || '').trim();
+        const isCurrent = currentBookKey && bookId === currentBookKey;
+
+        return `
+            <div class="hardcover-series-card${isCurrent ? ' hardcover-series-card--current' : ''}">
+                <a class="hardcover-series-card__main-link hardcover-series-search-link text-decoration-none"
+                    href="${escapeHtml(mouseSearchUrl)}"
+                    data-search-title="${escapeHtml(title)}"
+                    ${isCurrent ? 'aria-current="true"' : ''}>
+                    <div class="hardcover-series-card__frame">
+                        ${positionLabel ? `<span class="hardcover-series-card__position">${escapeHtml(positionLabel)}</span>` : ''}
+                        ${isCurrent ? '<span class="hardcover-series-card__current">Current</span>' : ''}
+                        <img class="hardcover-series-card__cover" src="${escapeHtml(proxyCoverUrl)}" alt="${escapeHtml(title)}" loading="lazy">
+                    </div>
+                </a>
+                <div class="hardcover-series-card__actions">
+                    <a class="hardcover-series-card__action hardcover-series-card__action--search hardcover-series-search-link"
+                        href="${escapeHtml(mouseSearchUrl)}"
+                        aria-label="Search MouseSearch for ${escapeHtml(title)}"
+                        data-search-title="${escapeHtml(title)}">
+                        <img src="${escapeHtml(MOUSESEARCH_LOGO_URL)}" alt="" loading="lazy">
+                    </a>
+                    ${hardcoverUrl ? `
+                        <a class="hardcover-series-card__action hardcover-series-card__action--hardcover"
+                            href="${escapeHtml(hardcoverUrl)}"
+                            aria-label="Open ${escapeHtml(title)} on Hardcover"
+                            target="_blank" rel="noopener noreferrer">
+                            <img src="${escapeHtml(HARDCOVER_LOGO_URL)}" alt="" loading="lazy">
+                        </a>` : ''}
+                </div>
+            </div>`;
+    }).join('');
+
+    section.classList.remove('d-none');
+    scrollHardcoverSeriesStripToCurrent(strip);
+}
+
+async function loadHardcoverSeriesStrip(metadata) {
+    const bookModalEl = document.getElementById('bookDetailsModal');
+    const seriesId = Number(metadata?.series_id ?? metadata?.featured_series?.id);
+    const currentBookId = String(metadata?.book_id || '').trim();
+    const currentPosition = normalizeHardcoverSeriesPosition(metadata?.featured_series?.position);
+    if (!bookModalEl || !Number.isFinite(seriesId) || seriesId <= 0) {
+        clearHardcoverSeriesStrip();
+        if (bookModalEl) bookModalEl.dataset.currentHardcoverSeriesId = '';
+        return;
+    }
+
+    bookModalEl.dataset.currentHardcoverSeriesId = String(seriesId);
+    const cached = hardcoverSeriesCache.get(String(seriesId));
+    if (cached) {
+        renderHardcoverSeriesStrip(cached, currentBookId, currentPosition);
+        return;
+    }
+
+    const section = document.getElementById('detail-hc-series-strip-section');
+    const strip = document.getElementById('detail-hc-series-strip');
+    const meta = document.getElementById('detail-hc-series-strip-meta');
+    if (meta) meta.textContent = 'Loading series...';
+    if (strip) strip.innerHTML = '<div class="text-body-secondary small py-2">Loading series…</div>';
+    if (section) section.classList.remove('d-none');
+
+    try {
+        const response = await fetch(`/hardcover/series/${encodeURIComponent(String(seriesId))}`);
+        if (!response.ok) {
+            throw new Error(`Hardcover series HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        const series = Array.isArray(payload?.series) ? payload.series[0] : null;
+        if (!series) {
+            clearHardcoverSeriesStrip();
+            return;
+        }
+        hardcoverSeriesCache.set(String(seriesId), series);
+        if (bookModalEl.dataset.currentHardcoverSeriesId !== String(seriesId)) {
+            return;
+        }
+        renderHardcoverSeriesStrip(series, currentBookId, currentPosition);
+    } catch (error) {
+        console.error('Hardcover series load error', error);
+        clearHardcoverSeriesStrip();
+    }
+}
+
+function renderBookDetailsHardcover(enrichment) {
+    const card = document.getElementById('detail-hardcover-card');
+    const heroInfo = document.getElementById('detail-hero-hc-info');
+    const bookModalEl = document.getElementById('bookDetailsModal');
+
+    const metadata = enrichment?.hardcover;
+    if (!metadata) {
+        if (card) card.style.display = 'none';
+        if (heroInfo) heroInfo.classList.add('d-none');
+        const heroActions = document.getElementById('detail-hero-hc-actions');
+        if (heroActions) {
+            heroActions.innerHTML = '';
+            heroActions.classList.add('d-none');
+        }
+        clearHardcoverSeriesStrip();
+        scheduleBookDetailsColumnBalance();
+        return;
+    }
+
+    const rating = Number(metadata.rating);
+    const hasRating = Number.isFinite(rating) && rating > 0;
+    const objectType = String(metadata?.object_type || '').trim().toLowerCase();
+    const isSeriesMatch = objectType === 'series';
+    const publishedText = formatHardcoverPublishedText(metadata);
+    const pagesText = currentDetailItemSupportsPages() ? formatHardcoverCount(metadata.pages) : '';
+    const readersText = formatHardcoverCount(metadata.users_read_count ?? metadata.users_count);
+    const titleHtml = renderHardcoverTitleHtml(metadata);
+    const authorHtml = renderHardcoverAuthorHtml(metadata);
+    const seriesHtml = renderHardcoverSeriesHtml(metadata);
+    const subtitleText = String(metadata.subtitle || '').trim();
+    const descriptionText = String(metadata.description || '').trim();
+    const genreBadges = renderHardcoverBadges(metadata.genres, 6);
+    const moodBadges = renderHardcoverBadges(metadata.moods, 5);
+    const reviewsUrl = hardcoverReviewsLink(metadata.slug);
+
+    // --- Sidebar card ---
+    if (card) {
+        card.style.display = '';
+        const toggleDetailRow = (row, isVisible) => {
+            if (!row) return;
+            row.classList.toggle('d-none', !isVisible);
+        };
+        const setDetailRow = (rowId, valueId, value) => {
+            const row = document.getElementById(rowId);
+            const el = document.getElementById(valueId);
+            const hasValue = String(value || '').trim().length > 0;
+            if (el) el.textContent = hasValue ? value : '';
+            toggleDetailRow(row, hasValue);
+        };
+        const setDetailRowHtml = (rowId, valueId, html) => {
+            const row = document.getElementById(rowId);
+            const el = document.getElementById(valueId);
+            const hasContent = String(html || '').trim().length > 0;
+            if (el) el.innerHTML = hasContent ? html : '';
+            toggleDetailRow(row, hasContent);
+        };
+        const setDetailBlockHtml = (blockId, valueId, html) => {
+            const block = document.getElementById(blockId);
+            const el = document.getElementById(valueId);
+            const hasContent = String(html || '').trim().length > 0;
+            if (el) el.innerHTML = hasContent ? html : '';
+            if (block) block.classList.toggle('d-none', !hasContent);
+        };
+        const subtitleBlock = document.getElementById('detail-hc-subtitle-block');
+        const subtitleEl = document.getElementById('detail-hc-subtitle');
+        const descriptionBlock = document.getElementById('detail-hc-description-block');
+        const descriptionEl = document.getElementById('detail-hc-description');
+        const titleLabel = document.getElementById('detail-hc-title-label');
+        const preserveHardcoverDescription = bookModalEl?.dataset.hardcoverDescriptionExpanded === 'true';
+        if (titleLabel) titleLabel.textContent = isSeriesMatch ? 'Series:' : 'Title:';
+        setDetailRowHtml('detail-hc-title-row', 'detail-hc-title', titleHtml);
+        setDetailRowHtml('detail-hc-authors-row', 'detail-hc-authors', authorHtml);
+        const ratingRow = document.getElementById('detail-hc-rating-row');
+        const ratingEl = document.getElementById('detail-hc-rating');
+        if (hasRating) {
+            ratingEl.innerHTML = renderStarRating(rating, metadata.ratings_count, {
+                countLinkUrl: reviewsUrl,
+                wrapWithLink: true,
+            });
+            toggleDetailRow(ratingRow, true);
+        } else {
+            toggleDetailRow(ratingRow, false);
+        }
+
+        const yearRow = document.getElementById('detail-hc-year-row');
+        const yearEl = document.getElementById('detail-hc-year');
+        if (publishedText) {
+            yearEl.textContent = publishedText;
+            toggleDetailRow(yearRow, true);
+        } else {
+            toggleDetailRow(yearRow, false);
+        }
+
+        setDetailRow('detail-hc-pages-row', 'detail-hc-pages', pagesText);
+        setDetailRow('detail-hc-readers-row', 'detail-hc-readers', readersText);
+        setDetailRowHtml('detail-hc-series-row', 'detail-hc-series', isSeriesMatch ? '' : seriesHtml);
+
+        if (subtitleEl) subtitleEl.textContent = subtitleText;
+        if (subtitleBlock) subtitleBlock.classList.toggle('d-none', !subtitleText);
+        if (descriptionEl) {
+            configureExpandableHardcoverDescription(descriptionEl, descriptionText, preserveHardcoverDescription);
+        }
+        if (descriptionBlock) descriptionBlock.classList.toggle('d-none', !descriptionText);
+
+        setDetailBlockHtml('detail-hc-genres-block', 'detail-hc-genres', genreBadges);
+        setDetailBlockHtml('detail-hc-moods-block', 'detail-hc-moods', moodBadges);
+
+        const linkContainer = document.getElementById('detail-hc-link-container');
+        if (linkContainer) {
+            const url = hardcoverUrl(metadata);
+            const statusHtml = renderHardcoverStatusPicker(metadata, {
+                torrentId: String(bookModalEl?.dataset.currentTorrentId || ''),
+                variant: 'full',
+            });
+            const actions = [];
+            if (statusHtml) actions.push(statusHtml);
+            if (url) {
+                actions.push(`<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-secondary">View on Hardcover <i class="bi bi-box-arrow-up-right ms-1"></i></a>`);
+            }
+            linkContainer.innerHTML = actions.length
+                ? `<div class="hardcover-card-actions">${actions.join('')}</div>`
+                : '';
+        }
+
+    }
+
+    scheduleBookDetailsColumnBalance();
+    loadHardcoverSeriesStrip(metadata);
+
+    // --- Hero area ---
+    if (heroInfo) {
+        const heroCard = document.getElementById('detail-hero-hc-link');
+        const heroLink = document.getElementById('detail-hero-hc-link-main');
+        const heroRating = document.getElementById('detail-hero-hc-rating');
+        const heroYear = document.getElementById('detail-hero-hc-year');
+        const heroActions = document.getElementById('detail-hero-hc-actions');
+
+        const url = hardcoverUrl(metadata);
+        if (heroLink) {
+            heroLink.href = url || '#';
+            heroLink.style.pointerEvents = url ? '' : 'none';
+            heroLink.style.cursor = url ? '' : 'default';
+
+            const author = firstListedName(metadata.authors);
+            const title = metadata.title || 'Unknown Title';
+            const tooltipText = `<div class='text-start'><strong>Title:</strong> ${escapeHtml(title)}<br><strong>Author:</strong> ${escapeHtml(author)}</div>`;
+
+            heroLink.setAttribute('data-bs-toggle', 'tooltip');
+            heroLink.setAttribute('data-bs-html', 'true');
+            heroLink.setAttribute('title', tooltipText);
+            heroLink.setAttribute('data-bs-original-title', tooltipText);
+
+            const existingTooltip = bootstrap.Tooltip.getInstance(heroLink);
+            if (existingTooltip) {
+                existingTooltip.dispose();
+            }
+            new bootstrap.Tooltip(heroLink);
+        }
+
+        let heroStatusHtml = '';
+        if (heroActions) {
+            heroStatusHtml = renderHardcoverStatusPicker(metadata, {
+                torrentId: String(bookModalEl?.dataset.currentTorrentId || ''),
+                variant: 'compact',
+            });
+            heroActions.innerHTML = heroStatusHtml || '';
+            heroActions.classList.toggle('d-none', !heroStatusHtml);
+        }
+
+        if (heroRating) {
+            heroRating.innerHTML = hasRating ? renderStarRating(rating, metadata.ratings_count) : '';
+            heroRating.classList.toggle('d-none', !hasRating);
+        }
+        if (heroYear) {
+            const heroPublishedText = formatHardcoverPublishedText(metadata, { preferYearOnly: true });
+            heroYear.textContent = heroPublishedText ? `Published ${heroPublishedText}` : '';
+            heroYear.classList.toggle('d-none', !heroPublishedText);
+        }
+
+        if (heroCard) {
+            heroCard.classList.toggle('d-none', !(hasRating || formatHardcoverPublishedText(metadata, { preferYearOnly: true }) || heroStatusHtml));
+        }
+        heroInfo.classList.toggle('d-none', !(hasRating || formatHardcoverPublishedText(metadata, { preferYearOnly: true }) || heroStatusHtml));
+    }
+}
+
+function hasOpenHardcoverStatusPicker() {
+    return !!document.querySelector('[data-hardcover-status-picker].is-open');
+}
+
+function flushPendingHardcoverEnrichmentUpdates() {
+    if (hasOpenHardcoverStatusPicker() || pendingHardcoverEnrichmentPayloads.size === 0) return;
+    const queuedPayloads = [...pendingHardcoverEnrichmentPayloads.values()];
+    pendingHardcoverEnrichmentPayloads.clear();
+    queuedPayloads.forEach(applyHardcoverEnrichmentUpdate);
+}
+
+function applyHardcoverEnrichmentUpdate(payload) {
+    const torrentId = String(payload?.torrent_id || '');
+    const searchId = String(payload?.search_id || '');
+    const enrichment = payload?.enrichment;
+    if (!torrentId || !enrichment) return;
+
+    const escapedTorrentId = window.CSS && CSS.escape
+        ? CSS.escape(torrentId)
+        : torrentId.replace(/["\\]/g, '\\$&');
+    const resultItem = document.querySelector(`.result-item[data-torrent-id="${escapedTorrentId}"]`);
+    if (!resultItem) return;
+    if (searchId && resultItem.dataset.searchId && resultItem.dataset.searchId !== searchId) return;
+
+    resultItem.dataset.hardcoverState = enrichment.hardcover ? 'matched' : 'unresolved';
+    resultItem.dataset.hardcoverScore = String(enrichment.match_score || 0);
+    resultItem.dataset.hardcoverPath = enrichment.query_path || '';
+    const observer = hardcoverEnrichmentObservers.get(searchId);
+    if (observer) observer.unobserve(resultItem);
+    updateResultJsonData(resultItem, { hardcover_enrichment: enrichment });
+
+    const container = resultItem.querySelector('[data-hardcover-container]');
+    if (container) {
+        // Destroy existing tooltip if any
+        const existingTooltipEl = container.querySelector('[data-bs-toggle="tooltip"]');
+        if (existingTooltipEl) {
+            const instance = bootstrap.Tooltip.getInstance(existingTooltipEl);
+            if (instance) instance.dispose();
+        }
+
+        container.innerHTML = renderHardcoverMetadata(enrichment, { torrentId });
+
+        const newTooltipEl = container.querySelector('[data-bs-toggle="tooltip"]');
+        if (newTooltipEl) {
+            new bootstrap.Tooltip(newTooltipEl);
+        }
+    }
+
+    const coverUrl = enrichment?.hardcover?.cover_image;
+    const hasMamCover = resultItem.dataset.hasMamCover === 'true';
+    if (coverUrl && !hasMamCover) {
+        const thumb = resultItem.querySelector('.results-thumb');
+        if (thumb) {
+            thumb.dataset.triedHardcoverCover = 'true';
+            thumb.src = `/proxy_thumbnail?url=${encodeURIComponent(coverUrl)}`;
+        }
+    }
+
+    // If the book details modal is open for this torrent, update its Hardcover section live
+    const bookModalEl = document.getElementById('bookDetailsModal');
+    if (bookModalEl && bookModalEl.classList.contains('show') && bookModalEl.dataset.currentTorrentId === torrentId) {
+        renderBookDetailsHardcover(enrichment);
+    }
+}
+
+function updateHardcoverEnrichment(payload) {
+    const torrentId = String(payload?.torrent_id || '');
+    if (hasOpenHardcoverStatusPicker()) {
+        if (torrentId) pendingHardcoverEnrichmentPayloads.set(torrentId, payload);
+        return;
+    }
+    applyHardcoverEnrichmentUpdate(payload);
+}
+
+function escapeHardcoverSearchId(searchId) {
+    return window.CSS && CSS.escape
+        ? CSS.escape(searchId)
+        : String(searchId).replace(/["\\]/g, '\\$&');
+}
+
+function hardcoverRowsForSearch(searchId, scope = document) {
+    const escapedSearchId = escapeHardcoverSearchId(searchId);
+    return [...scope.querySelectorAll(`.result-item[data-search-id="${escapedSearchId}"][data-hardcover-state]`)];
+}
+
+function hasPendingHardcoverRows(searchId) {
+    const escapedSearchId = escapeHardcoverSearchId(searchId);
+    return !!document.querySelector(`.result-item[data-search-id="${escapedSearchId}"][data-hardcover-state="pending"]`);
+}
+
+function markPendingHardcoverRows(searchId, reason = 'enrichment_unavailable') {
+    const escapedSearchId = escapeHardcoverSearchId(searchId);
+    document.querySelectorAll(`.result-item[data-search-id="${escapedSearchId}"][data-hardcover-state="pending"]`).forEach(item => {
+        updateHardcoverEnrichment({
+            search_id: searchId,
+            torrent_id: item.dataset.torrentId,
+            enrichment: {
+                hardcover: null,
+                match_score: 0,
+                query_path: 'failed',
+                failure_reason: reason
+            }
+        });
+    });
+}
+
+function stopHardcoverEnrichmentPolling() {
+    hardcoverEnrichmentPollers.forEach(timerId => clearInterval(timerId));
+    hardcoverEnrichmentPollers.clear();
+    hardcoverEnrichmentObservers.forEach(observer => observer.disconnect());
+    hardcoverEnrichmentObservers.clear();
+    hardcoverEnrichmentQueueRequests.clear();
+}
+
+async function pollHardcoverEnrichment(searchId) {
+    try {
+        const response = await fetch(`/hardcover/enrichment/${encodeURIComponent(searchId)}`, {
+            cache: 'no-store'
+        });
+        if (!response.ok) throw new Error(`Hardcover poll HTTP ${response.status}`);
+
+        const data = await response.json();
+        const results = Array.isArray(data.results) ? data.results : [];
+        results.forEach(item => {
+            updateHardcoverEnrichment({
+                event: 'hardcover-enrichment',
+                search_id: data.search_id || searchId,
+                torrent_id: item.torrent_id,
+                index: item.index,
+                enrichment: item.enrichment
+            });
+        });
+
+        if (data.completed && hasPendingHardcoverRows(searchId)) {
+            markPendingHardcoverRows(searchId, data.error || 'no_enrichment_result');
+        }
+
+        if (data.completed || !hasPendingHardcoverRows(searchId)) {
+            const timerId = hardcoverEnrichmentPollers.get(searchId);
+            if (timerId) clearInterval(timerId);
+            hardcoverEnrichmentPollers.delete(searchId);
+        }
+    } catch (error) {
+        console.warn('[HARDCOVER] Polling failed:', error);
+    }
+}
+
+function ensureHardcoverEnrichmentPolling(searchId) {
+    if (hardcoverEnrichmentPollers.has(searchId)) return;
+    pollHardcoverEnrichment(searchId);
+    const timerId = setInterval(() => pollHardcoverEnrichment(searchId), 1000);
+    hardcoverEnrichmentPollers.set(searchId, timerId);
+}
+
+function observeDeferredHardcoverRows(searchId, scope = document) {
+    const deferredRows = hardcoverRowsForSearch(searchId, scope).filter(item => item.dataset.hardcoverState === 'deferred');
+    if (!deferredRows.length) {
+        const existingObserver = hardcoverEnrichmentObservers.get(searchId);
+        if (existingObserver) {
+            existingObserver.disconnect();
+            hardcoverEnrichmentObservers.delete(searchId);
+        }
+        return;
+    }
+
+    let observer = hardcoverEnrichmentObservers.get(searchId);
+    if (!observer) {
+        observer = new IntersectionObserver(entries => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting) return;
+                const target = entry.target;
+                const rows = hardcoverRowsForSearch(searchId);
+                const index = rows.indexOf(target);
+                if (index < 0) return;
+                const start = Math.max(0, index - HARDCOVER_LAZY_BUFFER_ROWS);
+                const end = Math.min(rows.length - 1, index + HARDCOVER_LAZY_BUFFER_ROWS);
+                queueHardcoverEnrichmentRows(searchId, rows.slice(start, end + 1));
+            });
+        }, { threshold: 0.01 });
+        hardcoverEnrichmentObservers.set(searchId, observer);
+    }
+
+    deferredRows.forEach(item => observer.observe(item));
+}
+
+async function queueHardcoverEnrichmentRows(searchId, rows) {
+    const itemsToQueue = rows.filter(item => item && item.dataset.hardcoverState === 'deferred');
+    if (!itemsToQueue.length) return;
+
+    const torrentIds = [...new Set(itemsToQueue
+        .map(item => String(item.dataset.torrentId || '').trim())
+        .filter(Boolean)
+    )];
+    if (!torrentIds.length) return;
+
+    itemsToQueue.forEach(item => {
+        item.dataset.hardcoverState = 'pending';
+    });
+
+    const previousRequest = hardcoverEnrichmentQueueRequests.get(searchId) || Promise.resolve();
+    const queueRequest = previousRequest
+        .catch(() => undefined)
+        .then(async () => {
+            const response = await fetch(`/hardcover/enrichment/${encodeURIComponent(searchId)}/queue`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ torrent_ids: torrentIds }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.status !== 'success') {
+                throw new Error(data.message || `Hardcover queue request failed (HTTP ${response.status})`);
+            }
+            ensureHardcoverEnrichmentPolling(searchId);
+        })
+        .catch(error => {
+            console.warn('[HARDCOVER] Queueing failed:', error);
+            itemsToQueue.forEach(item => {
+                if (item.dataset.hardcoverState === 'pending') {
+                    item.dataset.hardcoverState = 'deferred';
+                }
+            });
+        })
+        .finally(() => {
+            if (hardcoverEnrichmentQueueRequests.get(searchId) === queueRequest) {
+                hardcoverEnrichmentQueueRequests.delete(searchId);
+            }
+            observeDeferredHardcoverRows(searchId);
+        });
+
+    hardcoverEnrichmentQueueRequests.set(searchId, queueRequest);
+    await queueRequest;
+}
+
+function queueInitialHardcoverRows(searchId, scope = document) {
+    const rows = hardcoverRowsForSearch(searchId, scope);
+    if (!rows.length) return;
+
+    const visibleIndexes = [];
+    rows.forEach((item, index) => {
+        const rect = item.getBoundingClientRect();
+        if (rect.bottom > 0 && rect.top < window.innerHeight) {
+            visibleIndexes.push(index);
+        }
+    });
+
+    const start = visibleIndexes.length
+        ? Math.max(0, visibleIndexes[0] - HARDCOVER_LAZY_BUFFER_ROWS)
+        : 0;
+    const end = visibleIndexes.length
+        ? Math.min(rows.length - 1, visibleIndexes[visibleIndexes.length - 1] + HARDCOVER_LAZY_BUFFER_ROWS)
+        : Math.min(rows.length - 1, HARDCOVER_LAZY_BUFFER_ROWS);
+
+    queueHardcoverEnrichmentRows(searchId, rows.slice(start, end + 1));
+}
+
+function startHardcoverEnrichmentLoading(scope = document) {
+    const ids = new Set();
+    scope.querySelectorAll('.result-item[data-search-id][data-hardcover-state]').forEach(item => {
+        const searchId = String(item.dataset.searchId || '').trim();
+        if (searchId && item.dataset.hardcoverState !== 'disabled') ids.add(searchId);
+    });
+
+    ids.forEach(searchId => {
+        queueInitialHardcoverRows(searchId, scope);
+        observeDeferredHardcoverRows(searchId, scope);
+    });
 }
 
 /**
@@ -519,6 +1984,9 @@ function initializeEventStream() {
                         updateMaxUploadPurchaseDisplay();
                     }
                     break;
+                case 'hardcover-enrichment':
+                    updateHardcoverEnrichment(data);
+                    break;
                 case 'vip_purchase':
                     if (data.success) {
                         showToast(`Auto VIP top-up: Added ${data.amount.toFixed(1)} weeks.`, 'success');
@@ -551,12 +2019,12 @@ function initializeEventStream() {
 function renderJsonTree(data, containerId) {
     const container = document.getElementById(containerId);
     if (!container) return;
-    
+
     container.innerHTML = ''; // Clear previous
 
     // 1. Safety Check & Parsing
     let jsonData = data;
-    
+
     // Handle "empty" cases
     if (!data || data === "{}" || (typeof data === 'string' && data.trim() === "{}")) {
         container.innerHTML = '<div class="text-secondary small fst-italic text-center py-2">No technical metadata available</div>';
@@ -577,33 +2045,33 @@ function renderJsonTree(data, containerId) {
     // 2. Recursive Tree Builder
     function createTree(obj) {
         const root = document.createElement('div');
-        
+
         for (const [key, value] of Object.entries(obj)) {
             // Case A: Value is an Object or Array (Accordion)
             if (value !== null && typeof value === 'object') {
                 const details = document.createElement('details');
-                
+
                 // Auto-open "General" and "Audio" keys for better UX
                 if (key === 'General' || key.startsWith('Audio')) details.open = true;
 
                 const summary = document.createElement('summary');
                 const sizeLabel = Array.isArray(value) ? ` [${value.length}]` : '';
-                
+
                 // Styling the summary text
                 summary.innerHTML = `<span class="opacity-75">${key}</span><small class="text-muted ms-1">${sizeLabel}</small>`;
-                
+
                 details.appendChild(summary);
                 details.appendChild(createTree(value)); // Recursion
                 root.appendChild(details);
-            } 
+            }
             // Case B: Value is Primitive (Row)
             else {
                 const row = document.createElement('div');
                 row.className = 'json-row';
-                
+
                 let displayValue = value;
                 if (value === null) displayValue = 'null';
-                
+
                 row.innerHTML = `<span class="json-key">${key}:</span><span class="json-val">${displayValue}</span>`;
                 root.appendChild(row);
             }
@@ -1024,25 +2492,103 @@ async function fetchAndUpdateTorrentStatus(hash, resultItem) {
     } catch (error) { console.error(`Error fetching hash ${hash}:`, error); }
 }
 
+function copyTextWithFeedback(button, text) {
+    if (!navigator.clipboard || !text) return;
+    navigator.clipboard.writeText(text);
+    const originalIcon = button.innerHTML;
+    button.innerHTML = '<i class="bi bi-check2 text-success"></i>';
+    setTimeout(() => button.innerHTML = originalIcon, 2000);
+}
+
+function fieldCopyValue(field) {
+    if (!field) return '';
+    const value = 'value' in field ? field.value : field.textContent;
+    return String(value || '').trim();
+}
+
+function updateCopyFieldButtons() {
+    document.querySelectorAll('.copy-field-btn').forEach(btn => {
+        const selector = btn.dataset.copyTarget;
+        const target = selector ? document.querySelector(selector) : null;
+        const value = fieldCopyValue(target);
+        const usableValue = value && value !== 'Not synced';
+        const mouseholeEnabled = document.getElementById('USE_MOUSEHOLE_MAM_COOKIE')?.checked;
+        const targetIsIgnoredMamId = btn.dataset.copyTarget === '#MAM_ID' && mouseholeEnabled;
+        btn.classList.toggle('d-none', !navigator.clipboard || !usableValue || targetIsIgnoredMamId);
+    });
+}
+
+function normalizeIpForCompare(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+let lastMouseholeIpMismatchToastKey = '';
+
+function currentMouseholeIpMismatch() {
+    const warning = document.getElementById('mousehole-ip-warning');
+    if (!warning) return null;
+
+    const mouseholeEnabled = document.getElementById('USE_MOUSEHOLE_MAM_COOKIE')?.checked;
+    const mouseholeIp = normalizeIpForCompare(warning.dataset.mouseholeIp);
+    const mousesearchIp = normalizeIpForCompare(window.mousesearchPublicIp);
+    const shouldWarn = Boolean(mouseholeEnabled && mouseholeIp && mousesearchIp && mouseholeIp !== mousesearchIp);
+
+    return { warning, mouseholeIp, mousesearchIp, shouldWarn };
+}
+
+function showMouseholeIpMismatchToast(force = false) {
+    const mismatch = currentMouseholeIpMismatch();
+    if (!mismatch?.shouldWarn) return;
+
+    const mismatchKey = `${mismatch.mouseholeIp}|${mismatch.mousesearchIp}`;
+    if (force || lastMouseholeIpMismatchToastKey !== mismatchKey) {
+        lastMouseholeIpMismatchToastKey = mismatchKey;
+        showToast('Mousehole and MouseSearch do not share the same public IP address. MouseSearch may not function.', 'danger');
+    }
+}
+
+function updateMouseholeIpWarning(showToastOnMismatch = true) {
+    const mismatch = currentMouseholeIpMismatch();
+    if (!mismatch) return;
+
+    const { warning, mouseholeIp, mousesearchIp, shouldWarn } = mismatch;
+
+    document.getElementById('mousehole-reported-ip').textContent = mouseholeIp;
+    document.getElementById('mousesearch-reported-ip').textContent = mousesearchIp;
+    warning.classList.toggle('d-none', !shouldWarn);
+
+    if (showToastOnMismatch && shouldWarn) {
+        showMouseholeIpMismatchToast();
+    } else {
+        lastMouseholeIpMismatchToastKey = '';
+    }
+}
+
+function setMouseholeReportedIp(ip, showToastOnMismatch = true) {
+    const warning = document.getElementById('mousehole-ip-warning');
+    if (!warning) return;
+    warning.dataset.mouseholeIp = String(ip || '').trim();
+    updateMouseholeIpWarning(showToastOnMismatch);
+}
+
 async function fetchPublicIP() {
     fetch('/system/public_ip')
         .then(r => r.json())
         .then(data => {
             if (data.ip) {
+                window.mousesearchPublicIp = data.ip;
                 document.querySelectorAll('.backend-ip-display').forEach(el => el.textContent = data.ip);
                 document.querySelectorAll('.backend-ip-display-badge').forEach(el => el.style.display = 'inline-block');
                 document.querySelectorAll('.copy-ip-btn').forEach(btn => {
                     if (navigator.clipboard) {
                         btn.onclick = (e) => {
-                            navigator.clipboard.writeText(data.ip);
-                            const originalIcon = btn.innerHTML;
-                            btn.innerHTML = '<i class="bi bi-check2 text-success"></i>';
-                            setTimeout(() => btn.innerHTML = originalIcon, 2000);
+                            copyTextWithFeedback(btn, data.ip);
                         };
                     } else {
                         btn.style.display = 'none';
                     }
                 });
+                updateMouseholeIpWarning();
             } else {
                 document.querySelectorAll('.backend-ip-display').forEach(el => el.textContent = "Error");
             }
@@ -1094,6 +2640,15 @@ document.addEventListener("DOMContentLoaded", async function () {
         });
     }
 
+    const advancedSearchButton = document.querySelector('[data-bs-target="#advancedSearchOffcanvas"]');
+    if (advancedSearchButton) {
+        advancedSearchButton.addEventListener('click', () => {
+            triggerHaptic('menu');
+        });
+    }
+
+    bindHapticClick('.btn-close[data-bs-dismiss="offcanvas"], .btn-close[data-bs-dismiss="modal"]', 'close');
+
     document.querySelectorAll('.accordion .accordion-button').forEach(btn => {
         btn.addEventListener('click', () => {
             triggerHaptic('accordion');
@@ -1103,6 +2658,192 @@ document.addEventListener("DOMContentLoaded", async function () {
     document.addEventListener('click', (event) => {
         if (event.target.closest('#mediainfo-tree-container summary')) {
             triggerHaptic('accordion');
+        }
+    });
+
+    const closeHardcoverStatusPickers = (exceptPicker = null) => {
+        const exceptCard = exceptPicker?.closest('.result-card') || null;
+        document.querySelectorAll('[data-hardcover-status-picker].is-open').forEach((picker) => {
+            if (exceptPicker && picker === exceptPicker) return;
+            picker.classList.remove('is-open');
+            picker.dataset.busy = 'false';
+            picker.closest('.result-card')?.classList.remove('result-card--status-open');
+            const toggle = picker.querySelector('[data-hardcover-status-toggle]');
+            if (toggle) {
+                toggle.setAttribute('aria-expanded', 'false');
+                toggle.disabled = false;
+            }
+            picker.querySelectorAll('[data-hardcover-status-option]').forEach((option) => {
+                option.disabled = false;
+            });
+        });
+        document.querySelectorAll('.result-card.result-card--status-open').forEach((card) => {
+            if (exceptCard && card === exceptCard) return;
+            card.classList.remove('result-card--status-open');
+        });
+        if (!exceptPicker && !hasOpenHardcoverStatusPicker()) {
+            flushPendingHardcoverEnrichmentUpdates();
+        }
+    };
+
+    const setHardcoverStatusPickerBusy = (picker, isBusy) => {
+        if (!picker) return;
+        picker.dataset.busy = isBusy ? 'true' : 'false';
+        const toggle = picker.querySelector('[data-hardcover-status-toggle]');
+        if (toggle) {
+            toggle.disabled = !!isBusy;
+            toggle.setAttribute('aria-busy', isBusy ? 'true' : 'false');
+            toggle.classList.toggle('is-pending', !!isBusy);
+        }
+        picker.querySelectorAll('[data-hardcover-status-option]').forEach((option) => {
+            option.disabled = !!isBusy;
+        });
+    };
+
+    const findHardcoverStatusPicker = (bookId, torrentId = '') => {
+        const normalizedBookId = Number(bookId);
+        if (!Number.isFinite(normalizedBookId) || normalizedBookId <= 0) return null;
+        const safeTorrentId = String(torrentId || '').trim();
+        if (safeTorrentId) {
+            const escapedTorrentId = window.CSS && CSS.escape
+                ? CSS.escape(safeTorrentId)
+                : safeTorrentId.replace(/["\\]/g, '\\$&');
+            const exactMatch = document.querySelector(
+                `[data-hardcover-status-picker][data-book-id="${normalizedBookId}"][data-torrent-id="${escapedTorrentId}"]`
+            );
+            if (exactMatch) return exactMatch;
+        }
+        return document.querySelector(`[data-hardcover-status-picker][data-book-id="${normalizedBookId}"]`);
+    };
+
+    const openHardcoverStatusPicker = (picker) => {
+        if (!picker) return;
+        closeHardcoverStatusPickers(picker);
+        picker.classList.add('is-open');
+        hardcoverStatusPickerOpenedAt = performance.now();
+        picker.closest('.result-card')?.classList.add('result-card--status-open');
+        const pickerToggle = picker.querySelector('[data-hardcover-status-toggle]');
+        if (pickerToggle) {
+            pickerToggle.setAttribute('aria-expanded', 'true');
+        }
+    };
+
+    const hydrateHardcoverUserBookStatus = async (picker) => {
+        if (!picker || picker.dataset.userBookKnown === 'true' || picker.dataset.userBookLoading === 'true') {
+            return picker;
+        }
+
+        const bookId = Number(picker.dataset.bookId || 0);
+        const torrentId = String(picker.dataset.torrentId || '').trim();
+        if (!Number.isFinite(bookId) || bookId <= 0) return picker;
+
+        picker.dataset.userBookLoading = 'true';
+        setHardcoverStatusPickerBusy(picker, true);
+
+        try {
+            const response = await fetch(`/hardcover/user-book/${bookId}`, { cache: 'no-store' });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.status !== 'success') {
+                throw new Error(data.message || `Hardcover status lookup failed (HTTP ${response.status})`);
+            }
+            syncHardcoverUserBookStatus(bookId, data.user_book, { userBookKnown: true });
+        } catch (error) {
+            console.warn('[HARDCOVER] Status hydrate failed:', error);
+        }
+
+        const refreshedPicker = findHardcoverStatusPicker(bookId, torrentId) || picker;
+        refreshedPicker.dataset.userBookLoading = 'false';
+        setHardcoverStatusPickerBusy(refreshedPicker, false);
+        return refreshedPicker;
+    };
+
+    const submitHardcoverStatusChange = async (picker, statusId, { action = '' } = {}) => {
+        if (!picker || picker.dataset.busy === 'true') return;
+        const bookId = Number(picker.dataset.bookId || 0);
+        const currentStatusId = Number(picker.dataset.currentStatusId || 0);
+        const normalizedAction = String(action || '').trim().toLowerCase();
+        const isRemove = normalizedAction === 'remove';
+        if (!Number.isFinite(bookId) || bookId <= 0) return;
+        if (!isRemove && (!Number.isFinite(statusId) || statusId <= 0)) return;
+        if (!isRemove && statusId === currentStatusId) {
+            closeHardcoverStatusPickers();
+            return;
+        }
+
+        closeHardcoverStatusPickers();
+        setHardcoverStatusPending(bookId, true);
+        try {
+            const response = await fetch('/hardcover/user-book/status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    book_id: bookId,
+                    ...(isRemove ? { action: 'remove' } : { status_id: statusId }),
+                }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.status !== 'success') {
+                throw new Error(data.message || `Hardcover status request failed (HTTP ${response.status})`);
+            }
+
+            syncHardcoverUserBookStatus(bookId, data.user_book);
+            showToast(data.message || (isRemove ? 'Hardcover status removed.' : 'Hardcover status updated.'), 'success');
+        } catch (error) {
+            showToast(error?.message || (isRemove ? 'Unable to remove Hardcover status.' : 'Unable to update Hardcover status.'), 'danger');
+        } finally {
+            setHardcoverStatusPending(bookId, false);
+        }
+    };
+
+    document.addEventListener('click', async (event) => {
+        const removeButton = event.target.closest('[data-hardcover-status-remove]');
+        if (removeButton) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            triggerHaptic('tap');
+            const picker = removeButton.closest('[data-hardcover-status-picker]');
+            submitHardcoverStatusChange(picker, null, { action: 'remove' });
+            return;
+        }
+
+        const option = event.target.closest('[data-hardcover-status-option]');
+        if (option) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            triggerHaptic('tap');
+            const picker = option.closest('[data-hardcover-status-picker]');
+            submitHardcoverStatusChange(picker, Number(option.dataset.hardcoverStatusOption || 0));
+            return;
+        }
+
+        const toggle = event.target.closest('[data-hardcover-status-toggle]');
+        if (toggle) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            triggerHaptic('tap');
+            let picker = toggle.closest('[data-hardcover-status-picker]');
+            if (!picker) return;
+            const shouldOpen = !picker.classList.contains('is-open');
+            if (!shouldOpen) {
+                closeHardcoverStatusPickers();
+                return;
+            }
+            picker = await hydrateHardcoverUserBookStatus(picker);
+            openHardcoverStatusPicker(picker);
+            return;
+        }
+
+        if (!event.target.closest('[data-hardcover-status-picker]')) {
+            if (hardcoverStatusPickerOpenedAt && (performance.now() - hardcoverStatusPickerOpenedAt) < 200) {
+                return;
+            }
+            closeHardcoverStatusPickers();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeHardcoverStatusPickers();
         }
     });
 
@@ -1156,8 +2897,11 @@ document.addEventListener("DOMContentLoaded", async function () {
         const isChecked = (id) => document.getElementById(id)?.checked || false;
 
         const config = [
+            { trigger: 'USE_MOUSEHOLE_MAM_COOKIE', target: 'MOUSEHOLE_API_URL' },
             { trigger: 'ENABLE_DYNAMIC_IP_UPDATE', target: 'DYNAMIC_IP_UPDATE_INTERVAL_HOURS' },
+            { trigger: 'HARDCOVER_ENRICHMENT_ENABLED', target: 'HARDCOVER_API_TOKEN' },
             { trigger: 'AUTO_BUY_VIP', target: 'AUTO_BUY_VIP_INTERVAL_HOURS' },
+            { trigger: 'AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED', target: 'AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB' },
             { trigger: 'AUTO_BUY_UPLOAD_ON_RATIO', target: ['AUTO_BUY_UPLOAD_RATIO_THRESHOLD', 'AUTO_BUY_UPLOAD_RATIO_AMOUNT'] },
             { trigger: 'AUTO_BUY_UPLOAD_ON_BUFFER', target: ['AUTO_BUY_UPLOAD_BUFFER_THRESHOLD', 'AUTO_BUY_UPLOAD_BUFFER_AMOUNT'] },
             { trigger: 'AUTO_BUY_UPLOAD_ON_BONUS', target: ['AUTO_BUY_UPLOAD_BONUS_THRESHOLD', 'AUTO_BUY_UPLOAD_BONUS_AMOUNT'] }
@@ -1171,6 +2915,17 @@ document.addEventListener("DOMContentLoaded", async function () {
                 if (el) el.disabled = !enabled;
             });
         });
+
+        const useMouseholeCookie = isChecked('USE_MOUSEHOLE_MAM_COOKIE');
+        const mamIdInput = document.getElementById('MAM_ID');
+        if (mamIdInput) {
+            mamIdInput.disabled = useMouseholeCookie;
+            mamIdInput.required = !useMouseholeCookie;
+        }
+        const syncMouseholeButton = document.getElementById('sync-mousehole-cookie-button');
+        if (syncMouseholeButton) syncMouseholeButton.disabled = !useMouseholeCookie;
+        updateCopyFieldButtons();
+        updateMouseholeIpWarning();
 
         // Upload Check Interval Logic
         const ratioOn = isChecked('AUTO_BUY_UPLOAD_ON_RATIO');
@@ -1198,6 +2953,52 @@ document.addEventListener("DOMContentLoaded", async function () {
             shouldShowAutoOrganizeAdvanced ? advancedSectionCollapse.show() : advancedSectionCollapse.hide();
         }
     }
+
+    function normalizeMouseholeBaseUrl(value) {
+        const raw = String(value || '').trim();
+        if (!raw) return '';
+        const withScheme = raw.includes('://') ? raw : `http://${raw}`;
+        return withScheme.replace(/\/+$/, '');
+    }
+
+    function updateMouseholeLogoSrc() {
+        const logo = document.getElementById('mousehole-settings-logo');
+        const fallbackIcon = document.getElementById('mousehole-settings-logo-fallback');
+        const input = document.getElementById('MOUSEHOLE_API_URL');
+        if (!logo) return;
+
+        const baseUrl = normalizeMouseholeBaseUrl(input?.value || logo.dataset.baseSrc || '');
+        if (!baseUrl) {
+            logo.classList.add('d-none');
+            fallbackIcon?.classList.remove('d-none');
+            return;
+        }
+
+        logo.dataset.logoAttempt = 'instance';
+        logo.classList.remove('d-none');
+        fallbackIcon?.classList.add('d-none');
+        logo.src = `${baseUrl}/logo.svg`;
+    }
+
+    const mouseholeLogo = document.getElementById('mousehole-settings-logo');
+    if (mouseholeLogo) {
+        mouseholeLogo.dataset.baseSrc = normalizeMouseholeBaseUrl(mouseholeLogo.src.replace(/\/logo\.svg$/, ''));
+        mouseholeLogo.addEventListener('error', function () {
+            const fallbackIcon = document.getElementById('mousehole-settings-logo-fallback');
+            if (this.dataset.logoAttempt === 'instance' && this.dataset.fallbackSrc) {
+                this.dataset.logoAttempt = 'github';
+                this.src = this.dataset.fallbackSrc;
+                return;
+            }
+            this.classList.add('d-none');
+            fallbackIcon?.classList.remove('d-none');
+        });
+    }
+
+    const mouseholeUrlInput = document.getElementById('MOUSEHOLE_API_URL');
+    mouseholeUrlInput?.addEventListener('change', updateMouseholeLogoSrc);
+    mouseholeUrlInput?.addEventListener('blur', updateMouseholeLogoSrc);
+    updateMouseholeLogoSrc();
 
 
     ['AUTO_ORGANIZE_ON_ADD', 'AUTO_ORGANIZE_ON_SCHEDULE'].forEach(id => {
@@ -1285,10 +3086,12 @@ document.addEventListener("DOMContentLoaded", async function () {
         settingsForm.addEventListener('input', () => {
             if (isRestoringSettings) return;
             settingsDirty = true;
+            updateCopyFieldButtons();
         });
         settingsForm.addEventListener('change', () => {
             if (isRestoringSettings) return;
             settingsDirty = true;
+            updateCopyFieldButtons();
         });
     }
 
@@ -1306,6 +3109,15 @@ document.addEventListener("DOMContentLoaded", async function () {
     if (settingsForm) {
         captureSettingsSnapshot();
     }
+
+    document.querySelectorAll('.copy-field-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const selector = btn.dataset.copyTarget;
+            const target = selector ? document.querySelector(selector) : null;
+            copyTextWithFeedback(btn, fieldCopyValue(target));
+        });
+    });
+    updateCopyFieldButtons();
 
     // --- Directory Structure Logic ---
     const relTemplateInput = document.getElementById('REL_PATH_TEMPLATE');
@@ -1413,7 +3225,7 @@ document.addEventListener("DOMContentLoaded", async function () {
                 settingsCatSelect.disabled = true;
             }
 
-            // 2. Disable and reset all Result card dropdowns 
+            // 2. Disable and reset all Result card dropdowns
             document.querySelectorAll('.category-dropdown').forEach(dd => {
                 dd.innerHTML = tempMsg;
                 dd.disabled = true;
@@ -1448,6 +3260,10 @@ document.addEventListener("DOMContentLoaded", async function () {
                 showToast(data.message, data.status === 'success' ? 'success' : 'danger');
                 if (data.status === 'success') {
                     captureSettingsSnapshot();
+                    const mouseholeCookieEl = document.getElementById('mousehole-last-cookie');
+                    if (mouseholeCookieEl && data.mousehole_cookie) mouseholeCookieEl.value = data.mousehole_cookie;
+                    if (Object.prototype.hasOwnProperty.call(data, 'mousehole_ip')) setMouseholeReportedIp(data.mousehole_ip);
+                    updateCopyFieldButtons();
                     const catDropdown = document.getElementById('TORRENT_CLIENT_CATEGORY');
                     if (catDropdown) catDropdown.dataset.currentValue = catDropdown.value;
 
@@ -1459,6 +3275,42 @@ document.addEventListener("DOMContentLoaded", async function () {
                 }
             })
             .catch(() => showToast("Error saving settings.", 'danger'));
+    });
+
+    document.getElementById('sync-mousehole-cookie-button')?.addEventListener('click', function () {
+        const button = this;
+        const lastCookieEl = document.getElementById('mousehole-last-cookie');
+        button.disabled = true;
+        const originalText = button.textContent;
+        button.textContent = 'Syncing...';
+
+        const payload = {
+            use_mousehole_mam_cookie: document.getElementById('USE_MOUSEHOLE_MAM_COOKIE')?.checked || false,
+            mousehole_api_url: document.getElementById('MOUSEHOLE_API_URL')?.value || ''
+        };
+
+        fetch('/mam/sync_mousehole_cookie', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+            .then(response => response.json().then(data => ({ ok: response.ok, data })))
+            .then(({ ok, data }) => {
+                if (lastCookieEl && data.cookie) lastCookieEl.value = data.cookie;
+                if (Object.prototype.hasOwnProperty.call(data, 'mousehole_ip')) setMouseholeReportedIp(data.mousehole_ip, false);
+                updateCopyFieldButtons();
+                showToast(data.message || (ok ? 'Mousehole cookie synced.' : 'Mousehole cookie sync failed.'), ok ? 'success' : 'danger');
+                if (ok && currentMouseholeIpMismatch()?.shouldWarn) {
+                    setTimeout(() => showMouseholeIpMismatchToast(true), 600);
+                }
+                if (ok) loadMamUserData();
+            })
+            .catch(() => showToast('Error syncing Mousehole cookie.', 'danger'))
+            .finally(() => {
+                button.textContent = originalText;
+                button.disabled = !document.getElementById('USE_MOUSEHOLE_MAM_COOKIE')?.checked;
+                updateCopyFieldButtons();
+            });
     });
 
     // Buy VIP Logic
@@ -1850,7 +3702,7 @@ document.addEventListener("DOMContentLoaded", async function () {
              dur="1.5s"
              repeatCount="indefinite" />
         </path>
-        
+
         <!-- Left Ear -->
         <circle
            cx="85"
@@ -1859,14 +3711,14 @@ document.addEventListener("DOMContentLoaded", async function () {
            fill="url(#earGradTail)"
            stroke="#100324"
            stroke-width="12">
-          <animateTransform 
-             attributeName="transform" 
-             type="rotate" 
-             values="0 120 120; -6 120 120; 0 120 120" 
-             dur="1.6s" 
+          <animateTransform
+             attributeName="transform"
+             type="rotate"
+             values="0 120 120; -6 120 120; 0 120 120"
+             dur="1.6s"
              repeatCount="indefinite" />
         </circle>
-        
+
         <!-- Right Ear -->
         <circle
            cx="215"
@@ -1875,14 +3727,14 @@ document.addEventListener("DOMContentLoaded", async function () {
            fill="url(#earGradTail)"
            stroke="#100324"
            stroke-width="12">
-          <animateTransform 
-             attributeName="transform" 
-             type="rotate" 
-             values="0 180 120; 6 180 120; 0 180 120" 
-             dur="1.6s" 
+          <animateTransform
+             attributeName="transform"
+             type="rotate"
+             values="0 180 120; 6 180 120; 0 180 120"
+             dur="1.6s"
              repeatCount="indefinite" />
         </circle>
-        
+
         <!-- Head -->
         <ellipse
            cx="150"
@@ -1892,21 +3744,21 @@ document.addEventListener("DOMContentLoaded", async function () {
            fill="url(#headGradTail)"
            stroke="#100324"
            stroke-width="12" />
-           
+
         <!-- Left Eye -->
         <circle
            cx="117"
            cy="111"
            r="11"
            fill="#100324" />
-           
+
         <!-- Right Eye -->
         <circle
            cx="183"
            cy="111"
            r="11"
            fill="#100324" />
-           
+
         <!-- Whiskers / Nose elements -->
         <path
            d="M 91.197315,148.72121 H 124.22088"
@@ -1918,7 +3770,7 @@ document.addEventListener("DOMContentLoaded", async function () {
            stroke="#100324"
            stroke-width="13.5626"
            stroke-linecap="round" />
-           
+
         <!-- Magnifying Glass -->
         <g transform="translate(0,2)">
           <line
@@ -2489,7 +4341,7 @@ document.addEventListener("DOMContentLoaded", async function () {
             // 1. Hide the logo
             logo.style.display = 'none';
             // 2. Read a layout property to force the browser to immediately recalculate the DOM
-            void logo.offsetWidth; 
+            void logo.offsetWidth;
             // 3. Show it again
             logo.style.display = '';
         }
@@ -3890,6 +5742,7 @@ document.addEventListener("DOMContentLoaded", async function () {
             }
         }
         hashToElementMap.clear();
+        stopHardcoverEnrichmentPolling();
         const searchUrl = queryString ? `/mam/search?${queryString}` : '/mam/search';
 
         if (preScrollToResults && wrapper) {
@@ -3928,6 +5781,7 @@ document.addEventListener("DOMContentLoaded", async function () {
                 refreshCategories();
                 initializeSnatchedTorrents();
                 applyHideDownloadedResultsFilter();
+                startHardcoverEnrichmentLoading(resultsContainer);
             })
             .catch(error => {
                 const errorText = error?.message ? `Search failed: ${error.message}` : 'Search failed.';
@@ -4083,6 +5937,28 @@ document.addEventListener("DOMContentLoaded", async function () {
         });
     }
 
+    document.addEventListener('click', (event) => {
+        const searchLink = event.target.closest('.hardcover-series-search-link');
+        if (!searchLink) return;
+        if (event.defaultPrevented) return;
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+
+        const href = searchLink.getAttribute('href');
+        if (!href) return;
+
+        event.preventDefault();
+        triggerHaptic('search');
+
+        const url = new URL(href, window.location.origin);
+        const queryString = url.searchParams.toString();
+        const newUrl = `${window.location.pathname}${queryString ? `?${queryString}` : ''}`;
+
+        restoreFormFromURL(url.searchParams);
+        history.pushState({ type: 'search', query: queryString }, '', newUrl);
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('bookDetailsModal')).hide();
+        performSearch(queryString);
+    });
+
     // ============================================================
     //  UNIFIED HISTORY & NAVIGATION MANAGER
     // ============================================================
@@ -4147,6 +6023,34 @@ document.addEventListener("DOMContentLoaded", async function () {
             history.back();
         }
     });
+    document.getElementById('bookDetailsModal')?.addEventListener('shown.bs.modal', function () {
+        const bookModalEl = document.getElementById('bookDetailsModal');
+        const detailDescriptionEl = document.getElementById('detail-description');
+        if (detailDescriptionEl) {
+            configureExpandableDetailDescription(
+                detailDescriptionEl,
+                detailDescriptionEl.dataset.expandableHtml || detailDescriptionEl.innerHTML || ''
+            );
+        }
+        const hardcoverDescriptionEl = document.getElementById('detail-hc-description');
+        if (hardcoverDescriptionEl) {
+            configureExpandableHardcoverDescription(
+                hardcoverDescriptionEl,
+                hardcoverDescriptionEl.textContent || '',
+                bookModalEl?.dataset.hardcoverDescriptionExpanded === 'true'
+            );
+        }
+        scheduleBookDetailsColumnBalance();
+    });
+    document.getElementById('bookDetailsModal')?.addEventListener('hidden.bs.modal', function () {
+        if (detailColumnBalanceFrame) {
+            cancelAnimationFrame(detailColumnBalanceFrame);
+            detailColumnBalanceFrame = 0;
+        }
+    });
+    window.addEventListener('resize', scheduleBookDetailsColumnBalance);
+    document.getElementById('mediaInfoCollapse')?.addEventListener('shown.bs.collapse', scheduleBookDetailsColumnBalance);
+    document.getElementById('mediaInfoCollapse')?.addEventListener('hidden.bs.collapse', scheduleBookDetailsColumnBalance);
 
     // 3. Settings Offcanvas: Sync History on Manual Close/Open
     const settingsEl = document.getElementById('settingsOffcanvas');
@@ -4240,7 +6144,7 @@ document.addEventListener("DOMContentLoaded", async function () {
 
             // CASE C: Clicked a Dropdown or Link (e.g., Author link)
             // We want default browser behavior, NOT opening the details modal
-            if (event.target.closest('select') || event.target.closest('a')) {
+            if (event.target.closest('select') || event.target.closest('a') || event.target.closest('[data-hardcover-status-picker]')) {
                 return;
             }
 
@@ -4264,7 +6168,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     }
 
     /**
- * REFACTORED: Handles the download logic. 
+ * REFACTORED: Handles the download logic.
  * Can be called from the main list OR the details modal.
  * @param {HTMLElement} button - The button clicked (contains data attributes)
  * @param {HTMLElement} resultItem - The row element (contains the category dropdown)
@@ -4458,7 +6362,10 @@ document.addEventListener("DOMContentLoaded", async function () {
         document.getElementById('detail-subtitle').innerHTML = seriesLabel ? `<span class="badge bg-secondary opacity-75">Series</span> ${seriesLabel}` : '';
         document.getElementById('detail-authors').textContent = authors;
         document.getElementById('detail-narrators').textContent = narrators;
-        document.getElementById('detail-description').innerHTML = data.description || "No description available.";
+        configureExpandableDetailDescription(
+            document.getElementById('detail-description'),
+            data.description || "No description available."
+        );
 
         // ============================================================
         // NEW: BADGE LOGIC START
@@ -4545,8 +6452,20 @@ document.addEventListener("DOMContentLoaded", async function () {
         heroBg.style.transform = 'scale(1.2)';
         heroBg.style.opacity = '0.5';
 
-        // 3. Attach Error Handler
-        activeImgEl.onerror = function () { handleBookCoverError(this); };
+        // 3. Attach Error Handler — try Hardcover cover before falling back to placeholder
+        const hcCoverProxy = data.hardcover_enrichment?.hardcover?.cover_image
+            ? `/proxy_thumbnail?url=${encodeURIComponent(data.hardcover_enrichment.hardcover.cover_image)}`
+            : null;
+        activeImgEl.onerror = function () {
+            if (hcCoverProxy && !this.dataset.triedHardcoverCover) {
+                this.dataset.triedHardcoverCover = 'true';
+                this.src = hcCoverProxy;
+                const bg = document.getElementById('detail-hero-bg');
+                if (bg) bg.style.backgroundImage = `url('${hcCoverProxy}')`;
+            } else {
+                handleBookCoverError(this);
+            }
+        };
 
         // 4. Set Initial State
         activeImgEl.src = lowResSrc;
@@ -4672,6 +6591,19 @@ document.addEventListener("DOMContentLoaded", async function () {
                 modalStatusContainer.innerHTML = rowStatus.innerHTML;
             }
         }
+
+        // Track which torrent is open so live enrichment updates can target the modal
+        const bookModalEl = document.getElementById('bookDetailsModal');
+        if (bookModalEl) {
+            bookModalEl.dataset.currentTorrentId = String(data.id || '');
+            bookModalEl.dataset.currentMainCat = String(data.main_cat || '');
+            bookModalEl.dataset.currentFiletype = String(data.filetype || '');
+            bookModalEl.dataset.hardcoverDescriptionExpanded = 'false';
+        }
+
+        // Render Hardcover enrichment card (may already be available or arrive later via SSE)
+        renderBookDetailsHardcover(data.hardcover_enrichment);
+        scheduleBookDetailsColumnBalance();
     }
 
     // Confirm Download Modal Action
@@ -4939,6 +6871,7 @@ function initAutosuggest(inputId) {
     if (isMainSearchInput) {
         container.classList.add('autosuggest-results--above');
     }
+    container.style.display = 'none';
     input.parentNode.appendChild(container);
 
     // State management for cancellation
@@ -4946,6 +6879,8 @@ function initAutosuggest(inputId) {
     let abortController = null;
     let cacheProbeController = null;
     let hasIssuedInitialSearch = false;
+    let activeIndex = -1;
+    let originalInputValue = '';
     const MIN_AUTOSUGGEST_LENGTH = 3;
     const INITIAL_AUTOSUGGEST_TRIGGER_LENGTH = 5;
 
@@ -5108,6 +7043,24 @@ function initAutosuggest(inputId) {
         document.querySelectorAll('.autosuggest-results').forEach((el) => {
             el.style.display = 'none';
         });
+        activeIndex = -1;
+    };
+
+    const dismissAutosuggest = () => {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+
+        if (abortController) {
+            abortController.abort();
+            abortController = null;
+        }
+        if (cacheProbeController) {
+            cacheProbeController.abort();
+            cacheProbeController = null;
+        }
+
+        container.style.display = 'none';
+        activeIndex = -1;
     };
 
     const isContainerVisibleInViewport = () => {
@@ -5151,6 +7104,8 @@ function initAutosuggest(inputId) {
 
     const renderSuggestions = (data, val) => {
         container.innerHTML = '';
+        activeIndex = -1;
+        originalInputValue = input.value.trim();
 
         if (!Array.isArray(data) || data.length === 0) {
             container.style.display = 'none';
@@ -5164,6 +7119,7 @@ function initAutosuggest(inputId) {
 
             const primaryType = item.primary_type || 'title';
             const primaryText = item.primary_text || item.title || item.author || item.series || '';
+            a.dataset.primaryText = primaryText;
             const authorText = String(item.author_text || '').trim();
             const showAuthorText = (primaryType === 'title' || primaryType === 'series') && authorText.length > 0;
             const badgeClass = getTypeBadgeClass(primaryType);
@@ -5187,8 +7143,7 @@ function initAutosuggest(inputId) {
 
             a.addEventListener('click', (e) => {
                 e.preventDefault();
-                if (abortController) abortController.abort();
-                clearTimeout(debounceTimer);
+                dismissAutosuggest();
 
                 input.value = primaryText;
 
@@ -5197,7 +7152,6 @@ function initAutosuggest(inputId) {
                     mainQuery.value = input.value;
                 }
 
-                container.style.display = 'none';
                 document.getElementById('searchButton').click();
             });
 
@@ -5314,10 +7268,31 @@ function initAutosuggest(inputId) {
         }
     };
 
+    const getItems = () => Array.from(container.querySelectorAll('.list-group-item'));
+
+    const activateSuggestion = (index) => {
+        const items = getItems();
+        items.forEach(item => item.classList.remove('active'));
+        if (index >= 0 && index < items.length) {
+            items[index].classList.add('active');
+            items[index].scrollIntoView({ block: 'nearest' });
+            input.value = items[index].dataset.primaryText || '';
+        } else {
+            input.value = originalInputValue;
+        }
+        activeIndex = index;
+    };
+
     // --- Event Listeners ---
 
     // 1. Input: Debounce the search
     input.addEventListener('input', (e) => {
+        // Only trigger autosuggest if the input is currently focused by the user.
+        // This prevents it from opening on page load if the URL has a pre-filled query.
+        if (document.activeElement !== input) {
+            return;
+        }
+
         clearTimeout(debounceTimer); // Clear previous timer
         const val = e.target.value.trim();
         if (!val) {
@@ -5353,18 +7328,54 @@ function initAutosuggest(inputId) {
         }, 300);
     });
 
-    // 2. Keydown: Check for Enter or Escape
+    // 2. Keydown: Arrow navigation, Enter, Escape
     input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-            // STOP everything:
-            clearTimeout(debounceTimer);      // 1. Stop the timer if it hasn't fired yet
-            if (abortController) {
-                abortController.abort();      // 2. Kill the fetch if it's currently running
+        const isOpen = container.style.display !== 'none';
+        if (isOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+            e.preventDefault();
+            const items = getItems();
+            if (!items.length) return;
+            if (e.key === 'ArrowDown') {
+                activateSuggestion(activeIndex < items.length - 1 ? activeIndex + 1 : 0);
+            } else {
+                // ArrowUp: -1 wraps to last; 0 goes back to -1 (restores typed text)
+                activateSuggestion(activeIndex === 0 ? -1 : (activeIndex < 0 ? items.length - 1 : activeIndex - 1));
             }
-            container.style.display = 'none'; // 3. Hide the UI immediately
+            return;
+        }
+        if (e.key === 'Enter') {
+            if (activeIndex >= 0) {
+                getItems()[activeIndex]?.click();
+                return;
+            }
+            dismissAutosuggest();
         }
         else if (e.key === 'Escape') {
-            container.style.display = 'none';
+            dismissAutosuggest();
+        }
+    });
+
+    // 2b. Container keydown: arrow navigation when list items are focused
+    container.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            const items = getItems();
+            if (!items.length) return;
+            if (e.key === 'ArrowDown') {
+                activateSuggestion(activeIndex < items.length - 1 ? activeIndex + 1 : 0);
+            } else {
+                if (activeIndex === 0) {
+                    activateSuggestion(-1);
+                    input.focus();
+                } else {
+                    activateSuggestion(activeIndex < 0 ? items.length - 1 : activeIndex - 1);
+                }
+            }
+        } else if (e.key === 'Enter') {
+            if (activeIndex >= 0) getItems()[activeIndex]?.click();
+        } else if (e.key === 'Escape') {
+            dismissAutosuggest();
+            input.focus();
         }
     });
 
@@ -5392,7 +7403,7 @@ function initAutosuggest(inputId) {
     }, true);
 
     associatedForm?.addEventListener('submit', () => {
-        hideAllAutosuggestContainers();
+        dismissAutosuggest();
     });
 
     searchFilterElements.forEach((element) => {

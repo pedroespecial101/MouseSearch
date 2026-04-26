@@ -11,7 +11,7 @@
     <form id="settings-form" autocomplete="off" class="d-flex flex-column h-100">
 
       <div class="px-3 pt-3 border-bottom">
-        <ul class="nav nav-underline justify-content-center" id="settingTabs" role="tablist">
+        <ul class="nav nav-underline" id="settingTabs" role="tablist">
           <li class="nav-item" role="presentation">
             <button class="nav-link active" id="general-tab" data-bs-toggle="tab" data-bs-target="#general-pane"
               type="button" role="tab" aria-controls="general-pane" aria-selected="true">
@@ -28,6 +28,13 @@
             <button class="nav-link" id="helpers-tab" data-bs-toggle="tab" data-bs-target="#helpers-pane" type="button"
               role="tab" aria-controls="helpers-pane" aria-selected="false">
               MAM Helpers
+            </button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="hardcover-tab" data-bs-toggle="tab" data-bs-target="#hardcover-pane"
+              type="button" role="tab" aria-controls="hardcover-pane" aria-selected="false">
+              <img src="/static/icons/hardcover.png" alt="" class="settings-menu-icon me-1" loading="lazy">
+              Hardcover
             </button>
           </li>
         </ul>
@@ -153,12 +160,80 @@
           <hr class="settings-divider my-4">
           <div id="MAM">
             <h6 class="text-uppercase section-title mb-3">MyAnonaMouse Auth</h6>
-            <div class="form-floating mb-3">
-              <input type="text" class="form-control font-monospace" id="MAM_ID" name="MAM_ID" value="{{ MAM_ID }}"
-                placeholder="MAM Session ID" required />
-              <label for="MAM_ID">mam_id</label>
+            <div class="card mb-3 border-secondary-subtle toggle-card">
+              <div
+                class="card-header border-bottom-0 bg-transparent d-flex justify-content-between align-items-center py-2 cursor-pointer noselect"
+                onclick="toggleCardSwitch('USE_MOUSEHOLE_MAM_COOKIE')">
+                <span class="small fw-bold d-flex align-items-center">
+                  <img id="mousehole-settings-logo" class="mousehole-settings-logo me-2"
+                    src="{{ MOUSEHOLE_API_URL }}/logo.svg"
+                    data-fallback-src="https://github.com/t-mart/mousehole/blob/master/docs/images/logo/logo.png?raw=true"
+                    alt="Mousehole logo">
+                  <i id="mousehole-settings-logo-fallback" class="bi bi-plugin me-2 d-none"></i>
+                  Use Mousehole
+                  Cookie
+                  <i class="bi bi-info-circle-fill text-secondary ms-2" data-bs-html="true" data-bs-toggle="tooltip"
+                    data-bs-placement="top" onclick="event.stopPropagation()"
+                    title="<div class='text-start'>Mousehole and MouseSearch must use the same public IP address, such as the same server or VPN connection. If they do not, MouseSearch may not function.</div>"></i>
+                </span>
+                <div class="form-check form-switch m-0">
+                  <input class="form-check-input" type="checkbox" id="USE_MOUSEHOLE_MAM_COOKIE"
+                    name="USE_MOUSEHOLE_MAM_COOKIE" {% if USE_MOUSEHOLE_MAM_COOKIE %}checked{% endif %}
+                    data-collapse-target="#collapse-mousehole">
+                </div>
+              </div>
+              <div id="collapse-mousehole" class="collapse {% if USE_MOUSEHOLE_MAM_COOKIE %}show{% endif %}">
+                <div class="card-body border-top pt-2 pb-2">
+                  <div class="form-floating mb-2">
+                    <input type="url" class="form-control" id="MOUSEHOLE_API_URL" name="MOUSEHOLE_API_URL"
+                      value="{{ MOUSEHOLE_API_URL }}" placeholder="http://localhost:5010">
+                    <label for="MOUSEHOLE_API_URL" class="small">Mousehole API URL</label>
+                  </div>
+                  <div class="form-text small">
+                    In this mode, MouseSearch reads the mam_id from Mousehole.
+                    Mousehole handles MAM IP updates on its own. Mousehole and MouseSearch must share the same public
+                    IP address, such as the same server or VPN connection.
+                  </div>
+                  <div id="mousehole-ip-warning" class="alert alert-danger small mt-3 mb-0 d-none"
+                    data-mousehole-ip="{{ MOUSEHOLE_LAST_HOST_IP }}">
+                    <strong>IP mismatch:</strong> Mousehole reports <span id="mousehole-reported-ip"
+                      class="font-monospace"></span>, but MouseSearch reports <span id="mousesearch-reported-ip"
+                      class="font-monospace"></span>. Mousehole and MouseSearch must share the same public IP address.
+                  </div>
+                  <div class="mt-3">
+                    <div class="input-group">
+                      <div class="form-floating">
+                        <input type="text" class="form-control font-monospace" id="mousehole-last-cookie"
+                          value="{{ MOUSEHOLE_LAST_MAM_COOKIE }}" placeholder="Last Mousehole cookie" readonly>
+                        <label for="mousehole-last-cookie">Last Mousehole cookie</label>
+                      </div>
+                      <button type="button" class="btn btn-outline-secondary copy-field-btn d-none"
+                        data-copy-target="#mousehole-last-cookie" title="Copy Mousehole cookie">
+                        <i class="bi bi-clipboard"></i>
+                      </button>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-primary mt-2" id="sync-mousehole-cookie-button">
+                      Sync Cookie from Mousehole
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="mb-3">
+              <div class="input-group">
+                <div class="form-floating">
+                  <input type="text" class="form-control font-monospace" id="MAM_ID" name="MAM_ID" value="{{ MAM_ID }}"
+                    placeholder="MAM Session ID" />
+                  <label for="MAM_ID">mam_id</label>
+                </div>
+                <button type="button" class="btn btn-outline-secondary copy-field-btn d-none"
+                  data-copy-target="#MAM_ID" title="Copy mam_id">
+                  <i class="bi bi-clipboard"></i>
+                </button>
+              </div>
               <div class="form-text">The <code class="text-primary">mam_id</code> value from MyAnonaMouse
-                <a href="https://www.myanonamouse.net/preferences/index.php?view=security">Settings</a>.
+                <a href="https://www.myanonamouse.net/preferences/index.php?view=security">Settings</a>. Ignored when
+                Mousehole Cookie is enabled.
                 <div
                   class="mt-4 p-2 bg-body-secondary rounded border d-flex justify-content-between align-items-center">
                   <div class="small">
@@ -421,6 +496,40 @@
         </div>
 
 
+        <div class="tab-pane fade" id="hardcover-pane" role="tabpanel" aria-labelledby="hardcover-tab" tabindex="0">
+          <h6 class="text-uppercase section-title mb-3">Metadata Enrichment</h6>
+
+          <div class="card mb-3 border-secondary-subtle toggle-card">
+            <div
+              class="card-header border-bottom-0 bg-transparent d-flex justify-content-between align-items-center py-2 cursor-pointer noselect"
+              onclick="toggleCardSwitch('HARDCOVER_ENRICHMENT_ENABLED')">
+              <span class="small fw-bold d-flex align-items-center">
+                <img src="/static/icons/hardcover.png" alt="" class="mousehole-settings-logo me-2" loading="lazy">
+                Enable Hardcover Metadata Enrichment
+              </span>
+              <div class="form-check form-switch m-0">
+                <input class="form-check-input" type="checkbox" id="HARDCOVER_ENRICHMENT_ENABLED"
+                  name="HARDCOVER_ENRICHMENT_ENABLED" {% if HARDCOVER_ENRICHMENT_ENABLED %}checked{% endif %}
+                  data-collapse-target="#collapse-hardcover-enrichment">
+              </div>
+            </div>
+            <div id="collapse-hardcover-enrichment"
+              class="collapse {% if HARDCOVER_ENRICHMENT_ENABLED %}show{% endif %}">
+              <div class="card-body border-top pt-2 pb-2">
+                <div class="form-text small mb-2">
+                  Use Hardcover to enrich search results and book details with additional metadata.
+                </div>
+                <div class="form-floating">
+                  <input type="password" class="form-control" id="HARDCOVER_API_TOKEN" name="HARDCOVER_API_TOKEN"
+                    value="{{ HARDCOVER_API_TOKEN }}" placeholder="Hardcover API key" autocomplete="off">
+                  <label for="HARDCOVER_API_TOKEN" class="small">Hardcover API key</label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+
         <div class="tab-pane fade" id="helpers-pane" role="tabpanel" aria-labelledby="helpers-tab" tabindex="0">
 
           <div class="card mb-3 border-secondary-subtle toggle-card">
@@ -437,6 +546,9 @@
             </div>
             <div id="collapse-ip" class="collapse {% if ENABLE_DYNAMIC_IP_UPDATE %}show{% endif %}">
               <div class="card-body border-top pt-2 pb-2">
+                <div class="form-text small mb-2">
+                  With Mousehole Cookie enabled, Mousehole handles IP updates and MouseSearch will not schedule its own.
+                </div>
                 <div class="form-floating">
                   <input type="number" class="form-control" id="DYNAMIC_IP_UPDATE_INTERVAL_HOURS"
                     name="DYNAMIC_IP_UPDATE_INTERVAL_HOURS" min="1" value="{{ DYNAMIC_IP_UPDATE_INTERVAL_HOURS }}"
@@ -470,7 +582,7 @@
             </div>
           </div>
 
-          <div class="card mb-3 border-secondary-subtle">
+          <div class="card mb-3 border-secondary-subtle toggle-card">
             <div
               class="card-header border-bottom-0 bg-transparent d-flex justify-content-between align-items-center py-2 cursor-pointer noselect"
               onclick="toggleCardSwitch('AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD')">
@@ -483,12 +595,43 @@
               <div class="form-check form-switch m-0">
                 <input class="form-check-input" type="checkbox" id="AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD"
                   name="AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD" {% if AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD %}checked{% endif %}
-                  onclick="event.stopPropagation()">
+                  data-collapse-target="#collapse-personal-fl" onclick="event.stopPropagation()">
               </div>
             </div>
-            <div class="card-body border-top pt-2 pb-2 small text-body-secondary">
-              Before each download, MouseSearch attempts to spend one personal Freeleech wedge. If purchase fails, the
-              download still proceeds.
+            <div id="collapse-personal-fl" class="collapse {% if AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD %}show{% endif %}">
+              <div class="card-body border-top pt-2 pb-2">
+                <div class="small text-body-secondary mb-2">
+                  Before each download, MouseSearch attempts to spend one personal Freeleech wedge. If purchase fails,
+                  the download still proceeds.
+                </div>
+
+                <div class="border rounded p-2 bg-body">
+                  <div class="d-flex justify-content-between align-items-center cursor-pointer noselect"
+                    onclick="toggleCardSwitch('AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED')">
+                    <span class="small fw-semibold">Only buy for torrents above a minimum size</span>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input" type="checkbox"
+                        id="AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED"
+                        name="AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED"
+                        {% if AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED %}checked{% endif %}
+                        data-collapse-target="#collapse-personal-fl-min-size" onclick="event.stopPropagation()">
+                    </div>
+                  </div>
+                  <div id="collapse-personal-fl-min-size"
+                    class="collapse {% if AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED %}show{% endif %}">
+                    <div class="input-group input-group-sm mt-2">
+                      <input type="number" min="0" step="0.1" class="form-control"
+                        id="AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"
+                        name="AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"
+                        value="{{ AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB }}" placeholder="Minimum size">
+                      <span class="input-group-text">MB</span>
+                    </div>
+                    <div class="form-text small">
+                      A wedge is spent only when the torrent size is greater than this value.
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 

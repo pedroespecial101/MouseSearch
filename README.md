@@ -225,7 +225,9 @@ Open the `.env` file and configure the following settings.
 | Variable | Required | Description |
 | :--- | :--- | :--- |
 | `QUART_SECRET_KEY` | **Yes** | A long, random string for session security. You can generate one with `openssl rand -hex 32` (or just smash on the keyboard a bit) |
-| `MAM_ID` | **Yes** | Your `mam_id` cookie value from [MyAnonamouse](https://www.myanonamouse.net/preferences/index.php?view=security). |
+| `MAM_ID` | **Yes, unless using Mousehole** | Your `mam_id` cookie value from [MyAnonamouse](https://www.myanonamouse.net/preferences/index.php?view=security). |
+| `USE_MOUSEHOLE_MAM_COOKIE` | No | Set to `true` to read the MAM cookie from a running Mousehole service instead of configuring `MAM_ID` in MouseSearch. Defaults to `false`. |
+| `MOUSEHOLE_API_URL` | If `USE_MOUSEHOLE_MAM_COOKIE` is `true` | Base URL for Mousehole's API, such as `http://localhost:5010` or `http://mousehole:5010`. Defaults to `http://localhost:5010`. |
 
 ### Torrent Client Configuration
 
@@ -246,7 +248,7 @@ MouseSearch supports modular torrent clients. Currently supported: **qBittorrent
 | Variable | Required | Description |
 | :--- | :--- | :--- |
 | `DATA_PATH` | No | Directory path for storing app data files (config.json, database.json, ip_state.json). Defaults to `./data`. |
-| `ENABLE_DYNAMIC_IP_UPDATE` | No | Set to `true` to enable automatic IP checking and updating of MAM's "Dynamic Seedbox IP" setting. Defaults to `false`. |
+| `ENABLE_DYNAMIC_IP_UPDATE` | No | Set to `true` to enable automatic IP checking and updating of MAM's "Dynamic Seedbox IP" setting. Ignored when Mousehole cookie mode is enabled because Mousehole handles its own IP updates. Defaults to `false`. |
 | `DYNAMIC_IP_UPDATE_INTERVAL_HOURS` | No | Number of hours between automatic IP checks (only applies if `ENABLE_DYNAMIC_IP_UPDATE` is `true`). Defaults to `3`. |
 | `AUTO_BUY_VIP` | No | Set to `true` to enable automatic VIP credit top-ups using bonus points. Defaults to `false`. |
 | `AUTO_BUY_VIP_INTERVAL_HOURS` | No | Number of hours between automatic VIP purchases (only applies if `AUTO_BUY_VIP` is `true`). Defaults to `24`. |
@@ -260,8 +262,15 @@ MouseSearch supports modular torrent clients. Currently supported: **qBittorrent
 | `AUTO_BUY_UPLOAD_BONUS_THRESHOLD` | No | If bonus points are at or above this value, auto-purchase upload credit until below threshold. Defaults to `5000`. |
 | `AUTO_BUY_UPLOAD_BONUS_AMOUNT` | No | Amount of upload credit (in GB) to purchase per bonus-threshold check (multiples of 50 only). Defaults to `50`. |
 | `AUTO_BUY_UPLOAD_CHECK_INTERVAL_HOURS` | No | Number of hours between ratio/buffer/bonus checks (only applies if auto-buy upload is enabled). Defaults to `6`. |
+| `AUTO_TASK_WEBHOOK_URL` | No | Optional webhook endpoint for auto-task notifications. When set, MouseSearch can notify on supported automatic task success/failure events. |
+| `AUTO_TASK_WEBHOOK_EVENTS` | No | Optional event allowlist for webhook notifications. Accepts a JSON array or comma-separated list such as `["auto_buy_vip"]` or `auto_buy_vip,auto_buy_upload_bonus`. If unset, all supported auto-task webhook events are sent. |
+| `AUTO_TASK_WEBHOOK_METHOD` | No | Webhook method: `POST` or `GET`. Defaults to `POST`. |
+| `AUTO_TASK_WEBHOOK_PARAMS` | No | Optional query parameters for the webhook. Accepts either a JSON object or a query-string template such as `source=mousesearch&event={event}&status={status}`. |
+| `AUTO_TASK_WEBHOOK_BODY` | No | Optional POST body template. Accepts JSON or raw text. Ignored for `GET` requests. |
 | `BLOCK_DOWNLOAD_ON_LOW_BUFFER` | No | Set to `true` to prevent downloads when torrent size exceeds available buffer (prompts user to purchase upload credit). Defaults to `true`. |
 | `AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD` | No | Set to `true` to auto-attempt spending a personal Freeleech wedge before each download add. If purchase fails, the torrent is still added. Defaults to `false`. |
+| `AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED` | No | Set to `true` to only auto-spend a personal Freeleech wedge when the torrent size is greater than the configured minimum. Defaults to `false`. |
+| `AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB` | No | Minimum torrent size, in MB, required before auto-spending a personal Freeleech wedge when the minimum-size gate is enabled. Defaults to `0`. |
 | `HAPTICS_ENABLED` | No | Set to `true` to enable frontend haptic feedback where the browser/device supports it. Defaults to `true`. |
 | `AUTO_ORGANIZE_ON_ADD` | No | Set to `true` to enable auto-organization when torrents are added. Defaults to `false`. |
 | `AUTO_ORGANIZE_ON_SCHEDULE` | No | Set to `true` to enable scheduled auto-organization. Defaults to `false`. |
@@ -275,6 +284,14 @@ MouseSearch supports modular torrent clients. Currently supported: **qBittorrent
 | `THUMBNAIL_CACHE_MAX_SIZE_MB` | No | Maximum cache size in megabytes (only applies when `ENABLE_FILESYSTEM_THUMBNAIL_CACHE` is enabled). Oldest files are deleted first when limit is exceeded. Defaults to `500`. |
 | `MAX_SEARCH_RESULTS` | No | Maximum number of search results returned per query. Defaults to `50`. |
 | `MAX_AUTOCOMPLETE_RESULTS` | No | Maximum number of autocomplete suggestions returned per query. Defaults to `20`. |
+| `HARDCOVER_ENRICHMENT_ENABLED` | No | Enables server-side Hardcover enrichment for MAM search results. Defaults to `true`; requires `HARDCOVER_API_TOKEN`. |
+| `HARDCOVER_API_TOKEN` | No | Hardcover GraphQL API token. Keep this server-side; it is never sent to browser code. Use the raw token; `Bearer ` is added automatically if omitted. |
+| `HARDCOVER_API_URL` | No | Hardcover GraphQL endpoint. Defaults to `https://api.hardcover.app/v1/graphql`. |
+| `HARDCOVER_USER_AGENT` | No | Descriptive User-Agent sent to Hardcover. Defaults to `MouseSearch Hardcover Enrichment`. |
+| `HARDCOVER_RATE_LIMIT` | No | Shared global rate cap for all server-side Hardcover API requests, in requests per minute. Defaults to `60`. |
+| `HARDCOVER_MATCH_THRESHOLD` | No | Fuzzy validation threshold on a 0-100 scale. Defaults to `78`. |
+| `HARDCOVER_CONCURRENCY` | No | Maximum in-flight Hardcover enrichments. Defaults to `6`. |
+| `HARDCOVER_SEARCH_PER_PAGE` | No | Hardcover candidates checked per search path. Defaults to `5`. |
 | `RESULTS_DISPLAY_FIELDS` | No | List of fields to display in search results. Options: `date_uploaded`, `file_type`, `file_size`, `snatches`, `seeders`, `category`, `language`, `narrator`, `series`. |
 | `APP_LOG_LEVEL` | No | Application log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Defaults to `INFO`. |
 | `LOG_HTTP_REQUESTS` | No | Enables app-level HTTP request logging with sanitized query params. Defaults to `false`. |
@@ -285,6 +302,52 @@ MouseSearch supports modular torrent clients. Currently supported: **qBittorrent
 | `PGID` | No | (Docker only) Group ID to run the container as. Set to your host user's GID for correct file permissions. |
 
 Legacy compatibility: `TORRENT_DOWNLOAD_PATH` is still accepted as an alias for `LOCAL_TORRENT_DOWNLOAD_PATH`, but new installs should use the new name.
+
+### Auto-Task Webhook Templates
+
+If `AUTO_TASK_WEBHOOK_URL` is set, MouseSearch sends webhook notifications for:
+
+* `auto_buy_vip`
+* `auto_buy_upload_ratio`
+* `auto_buy_upload_buffer`
+* `auto_buy_upload_bonus`
+* `auto_update_ip`
+* `auto_organize_on_download`
+* `auto_organize_on_schedule`
+
+Set `AUTO_TASK_WEBHOOK_EVENTS` if you only want a subset of those events.
+
+If you do not set `AUTO_TASK_WEBHOOK_PARAMS` or `AUTO_TASK_WEBHOOK_BODY`, MouseSearch sends a default structured payload:
+
+* `GET`: default event fields are sent as query parameters.
+* `POST`: default event fields are sent as a JSON body.
+
+Templates may use placeholders such as `{event}`, `{task}`, `{status}`, `{success}`, `{timestamp}`, `{amount}`, `{seedbonus}`, `{error}`, `{reason}`, `{threshold}`, `{purchase_size}`, `{purchase_count}`, `{starting_seedbonus}`, and `{summary}`. Missing fields render as empty strings.
+
+Example `POST` webhook:
+
+```env
+AUTO_TASK_WEBHOOK_URL=https://hooks.example.com/mousesearch
+AUTO_TASK_WEBHOOK_EVENTS=["auto_buy_vip","auto_buy_upload_ratio","auto_buy_upload_buffer","auto_buy_upload_bonus","auto_update_ip","auto_organize_on_download","auto_organize_on_schedule"]
+AUTO_TASK_WEBHOOK_METHOD=POST
+AUTO_TASK_WEBHOOK_PARAMS={"source":"mousesearch","event":"{event}","status":"{status}"}
+AUTO_TASK_WEBHOOK_BODY={"status":"{status}","summary":"{summary}"}
+```
+
+Example `GET` webhook:
+
+```env
+AUTO_TASK_WEBHOOK_URL=https://hooks.example.com/mousesearch
+AUTO_TASK_WEBHOOK_EVENTS=auto_buy_vip
+AUTO_TASK_WEBHOOK_METHOD=GET
+AUTO_TASK_WEBHOOK_PARAMS=source=mousesearch&event={event}&status={status}&summary={summary}
+```
+
+**Using Mousehole for the MAM cookie:**
+
+If you already run [Mousehole](https://github.com/t-mart/mousehole), enable `USE_MOUSEHOLE_MAM_COOKIE` and set `MOUSEHOLE_API_URL` to the URL MouseSearch can reach. MouseSearch reads Mousehole's `currentCookie` from `GET /state`. MouseSearch does not schedule or force IP updates in this mode; Mousehole remains responsible for keeping MAM's dynamic seedbox IP current.
+
+**Important:** Mousehole and MouseSearch must share the same public IP address, such as the same server or VPN connection. If they do not, MouseSearch may not function.
 
 **How to find your `MAM_ID`:**
 1.  In any web browser, navigate to [Security](https://www.myanonamouse.net/preferences/index.php?view=security) on Myanonamouse

@@ -9,6 +9,7 @@
 {% else %}
 {% set type_specific_torrent_categories = TYPE_SPECIFIC_TORRENT_CATEGORIES | default([], true) %}
 {% set default_client_category = TORRENT_CLIENT_CATEGORY | default('', true) %}
+{% set hardcover_active = HARDCOVER_ENRICHMENT_ACTIVE | default(false, true) %}
 
 {% set enabled_fields = RESULTS_DISPLAY_FIELDS or [] %}
 
@@ -33,7 +34,10 @@
 {% endmacro %}
 
 {% for result in results %}
-<div class="card result-card rounded-3 my-3 overflow-hidden result-item" data-torrent-id="{{ result.id }}"
+<div class="card result-card rounded-3 my-3 result-item" data-torrent-id="{{ result.id }}"
+    data-search-id="{{ search_id | default('', true) }}"
+    data-hardcover-state="{% if hardcover_active %}deferred{% else %}disabled{% endif %}"
+    data-has-mam-cover="{% if result.has_mam_cover %}true{% else %}false{% endif %}"
     data-snatched="{{ result.my_snatched }}" data-torrent-url="{{ result.download_link | safe }}"
     data-json="{{ result | tojson | forceescape }}">
 
@@ -44,7 +48,7 @@
                 <img class="img-fluid results-thumb rounded" src="{{ url_for('proxy_thumbnail', url=result.thumbnail) }}"
                     alt="Thumbnail" loading="lazy"
                     style="width: 100%; height: auto; max-height:400px; object-fit: contain;"
-                    onerror="this.onerror=null; this.src='/static/icons/no_cover.png';">
+                    onerror="handleResultThumbnailError(this);">
             </div>
         </div>
 
@@ -87,6 +91,21 @@
                     </div>
                 </div>
             </div>
+
+            {% if hardcover_active %}
+            <div class="hardcover-enrichment small mt-2 mb-2" data-hardcover-container>
+                <div class="hardcover-match hardcover-match--pending d-flex flex-column gap-1 text-decoration-none pe-none">
+                    <div class="d-flex align-items-center gap-1 text-body-secondary" style="font-size: 0.7rem;">
+                        <img src="/static/icons/hardcover.png" alt="" style="width: 0.8rem; height: 0.8rem; object-fit: contain;" loading="lazy">
+                        <span class="text-uppercase fw-semibold" style="letter-spacing: 0.05em;">Hardcover</span>
+                    </div>
+                    <div class="d-flex align-items-center gap-1" style="font-size: 0.8rem;">
+                        <span class="spinner-border spinner-border-sm" aria-hidden="true" style="width: 0.6rem; height: 0.6rem; border-width: 0.1em;"></span>
+                        <span>Checking...</span>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
 
             <div id="footer"
                 class="d-flex justify-content-between align-items-center border-top border-secondary-subtle pt-2 text-body-secondary small mt-auto w-100">

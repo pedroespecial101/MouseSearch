@@ -16,13 +16,14 @@ import uuid
 import sqlite3
 import ipaddress
 from difflib import SequenceMatcher
+from typing import Any
 
 from datetime import datetime, timedelta
 from dotenv import load_dotenv, dotenv_values
 from httpx import Limits, Timeout, AsyncHTTPTransport
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlparse
 
 import re
 from pathlib import Path
@@ -41,13 +42,24 @@ RAPIDFUZZ_AVAILABLE = fuzz is not None
 
 from clients import get_torrent_client, get_client_display_name, get_available_clients
 from hashing import calculate_torrent_hash_from_url, calculate_torrent_hash_from_bytes
+from hardcover.client import HardcoverAPIError, HardcoverClient
+from hardcover.resolver import HardcoverBatchRunner, HardcoverEnrichmentConfig, HardcoverResolver
 
 # --- SCHEDULER AND STATE SETUP ---
 app = Quart(__name__)
 
 UPSTREAM_CLIENT: httpx.AsyncClient | None = None
+HARDCOVER_CLIENT: HardcoverClient | None = None
+HARDCOVER_USER_BOOK_PRELOAD_ACTIVE = False
 
 torrent_client = None
+mam_session_cookies = {}
+mam_session_cookie_lock = asyncio.Lock()
+mousehole_cookie_last_refresh = 0.0
+mousehole_cookie_last_error = None
+mousehole_last_mam_cookie = ""
+mousehole_last_host_ip = ""
+MOUSEHOLE_COOKIE_REFRESH_SECONDS = 30.0
 
 # --- Monitoring & Caching Globals ---
 monitoring_state = {} 
@@ -58,6 +70,10 @@ pending_mid_resolutions = {}  # Maps MID -> {"added_at": timestamp, "metadata": 
 
 # --- SSE Globals ---
 connected_websockets = set() 
+hardcover_enrichment_batches = {}
+HARDCOVER_ENRICHMENT_BATCH_TTL_SECONDS = 10 * 60
+hardcover_series_response_cache = {}
+HARDCOVER_SERIES_CACHE_TTL_SECONDS = 6 * 60 * 60
 
 # --- RATE LIMITING HELPER ---
 class LeakyBucket:
@@ -184,6 +200,48 @@ def coerce_bool(val, default: bool) -> bool:
 
     # Unknown value => default
     return default
+
+
+def parse_size_to_gb(size_value, default=0.0):
+    """Parse a tracker-style size string into GiB-equivalent GB."""
+    if size_value is None:
+        return default
+
+    if isinstance(size_value, (int, float)) and not isinstance(size_value, bool):
+        return float(size_value)
+
+    text = str(size_value).strip().replace(",", "")
+    if not text:
+        return default
+
+    match = re.fullmatch(r"([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*([KMGT]?i?B|[KMGT]?B)?", text, re.IGNORECASE)
+    if not match:
+        return default
+
+    try:
+        value = float(match.group(1))
+    except (ValueError, TypeError):
+        return default
+
+    unit = (match.group(2) or "GB").upper()
+    if unit in {"TIB", "TB"}:
+        return value * 1024
+    if unit in {"GIB", "GB"}:
+        return value
+    if unit in {"MIB", "MB"}:
+        return value / 1024
+    if unit in {"KIB", "KB"}:
+        return value / (1024 * 1024)
+    if unit == "B":
+        return value / (1024 * 1024 * 1024)
+    return value
+
+
+def coerce_legacy_gb_to_mb(value, default=0.0):
+    gb_value = parse_size_to_gb(value, default=None)
+    if gb_value is None:
+        return default
+    return gb_value * 1024
 
 
 def normalize_string_list(value):
@@ -640,7 +698,7 @@ async def startup():
         )
         scheduler.add_job(check_and_buy_upload, 'date', run_date=datetime.now() + timedelta(seconds=15), id='initial_upload_check_job')
 
-    if app.config.get("ENABLE_DYNAMIC_IP_UPDATE"):
+    if app.config.get("ENABLE_DYNAMIC_IP_UPDATE") and not uses_mousehole_mam_cookie():
         interval_hours = int(app.config.get("DYNAMIC_IP_UPDATE_INTERVAL_HOURS", 3))
         misfire_grace_seconds = max(1, int(interval_hours * 3600 * 0.8))
         scheduler.add_job(
@@ -696,6 +754,11 @@ async def shutdown():
     if scheduler.running:
         scheduler.shutdown()
         app.logger.info("AsyncIOScheduler shutdown")
+
+    global HARDCOVER_CLIENT
+    if HARDCOVER_CLIENT is not None:
+        await HARDCOVER_CLIENT.aclose()
+        HARDCOVER_CLIENT = None
 
     global UPSTREAM_CLIENT
     if UPSTREAM_CLIENT is not None:
@@ -884,6 +947,8 @@ FALLBACK_CONFIG = {
     "TORRENT_CLIENT_CATEGORY": "",
     "RTORRENT_DIGEST_AUTH": False,
     "MAM_ID": "",
+    "USE_MOUSEHOLE_MAM_COOKIE": False,
+    "MOUSEHOLE_API_URL": "http://localhost:5010",
     "DATA_PATH": "./data",
     "ORGANIZED_PATH": "/downloads/organized",
     "DESTINATION_PATHS": [
@@ -914,10 +979,20 @@ FALLBACK_CONFIG = {
     "AUTO_BUY_UPLOAD_CHECK_INTERVAL_HOURS": 6,
     "BLOCK_DOWNLOAD_ON_LOW_BUFFER": True,
     "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD": False,
+    "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED": False,
+    "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB": 0,
     "ENABLE_FILESYSTEM_THUMBNAIL_CACHE": True,
     "THUMBNAIL_CACHE_MAX_SIZE_MB": 500,
     "MAX_SEARCH_RESULTS": 50,
     "MAX_AUTOCOMPLETE_RESULTS": 20,
+    "HARDCOVER_ENRICHMENT_ENABLED": True,
+    "HARDCOVER_API_TOKEN": "",
+    "HARDCOVER_API_URL": "https://api.hardcover.app/v1/graphql",
+    "HARDCOVER_USER_AGENT": "MouseSearch Hardcover Enrichment",
+    "HARDCOVER_RATE_LIMIT": 60,
+    "HARDCOVER_MATCH_THRESHOLD": 78.0,
+    "HARDCOVER_CONCURRENCY": 6,
+    "HARDCOVER_SEARCH_PER_PAGE": 5,
     "RESULTS_DISPLAY_FIELDS": ["narrator", "series", "file_size", "file_type", "seeders"],
     "SEARCH_FILTER_DEFAULTS": copy.deepcopy(DEFAULT_SEARCH_FILTER_DEFAULTS),
 }
@@ -1043,6 +1118,25 @@ def resolve_local_content_path(config: dict, torrent_info: dict) -> Path | None:
 
     return Path(name)
 
+
+def normalize_mousehole_api_url(value) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    return raw.rstrip("/")
+
+
+def normalize_mam_cookie_value(value) -> str:
+    raw = str(value or "").strip()
+    for part in raw.split(";"):
+        name, sep, val = part.strip().partition("=")
+        if sep and name.strip() == "mam_id":
+            return val.strip()
+    return raw
+
+
 def load_config():
     # 1. Start with Hardcoded Defaults (Lowest Priority)
     config = copy.deepcopy(FALLBACK_CONFIG)
@@ -1050,6 +1144,13 @@ def load_config():
     # 2. Update with Environment Variables (Medium Priority)
     # These act as fallbacks if the key is missing in config.json
     env_config = {key: os.getenv(key) for key in FALLBACK_CONFIG.keys() if os.getenv(key) is not None}
+    if (
+        "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB" not in env_config
+        and os.getenv("AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_GB") is not None
+    ):
+        env_config["AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"] = coerce_legacy_gb_to_mb(
+            os.getenv("AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_GB")
+        )
     apply_legacy_config_aliases(env_config, os.environ)
     config.update(env_config)
 
@@ -1064,6 +1165,13 @@ def load_config():
                 pass # corrupted config, ignore
 
     json_overrides = dict(json_config)
+    if (
+        "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB" not in json_overrides
+        and "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_GB" in json_overrides
+    ):
+        json_overrides["AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"] = coerce_legacy_gb_to_mb(
+            json_overrides.get("AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_GB")
+        )
     apply_legacy_config_aliases(json_overrides, json_config)
     config.update(json_overrides)
 
@@ -1079,6 +1187,9 @@ def load_config():
         "THUMBNAIL_CACHE_MAX_SIZE_MB",
         "MAX_SEARCH_RESULTS",
         "MAX_AUTOCOMPLETE_RESULTS",
+        "HARDCOVER_RATE_LIMIT",
+        "HARDCOVER_CONCURRENCY",
+        "HARDCOVER_SEARCH_PER_PAGE",
     ]:
         try:
             config[key] = int(config[key])
@@ -1089,6 +1200,12 @@ def load_config():
         config["MAX_SEARCH_RESULTS"] = FALLBACK_CONFIG["MAX_SEARCH_RESULTS"]
     if config["MAX_AUTOCOMPLETE_RESULTS"] <= 0:
         config["MAX_AUTOCOMPLETE_RESULTS"] = FALLBACK_CONFIG["MAX_AUTOCOMPLETE_RESULTS"]
+    if config["HARDCOVER_RATE_LIMIT"] <= 0:
+        config["HARDCOVER_RATE_LIMIT"] = FALLBACK_CONFIG["HARDCOVER_RATE_LIMIT"]
+    if config["HARDCOVER_CONCURRENCY"] <= 0:
+        config["HARDCOVER_CONCURRENCY"] = FALLBACK_CONFIG["HARDCOVER_CONCURRENCY"]
+    if config["HARDCOVER_SEARCH_PER_PAGE"] <= 0:
+        config["HARDCOVER_SEARCH_PER_PAGE"] = FALLBACK_CONFIG["HARDCOVER_SEARCH_PER_PAGE"]
 
     # Floats
     for key in [
@@ -1097,12 +1214,20 @@ def load_config():
         "AUTO_BUY_UPLOAD_BUFFER_THRESHOLD",
         "AUTO_BUY_UPLOAD_BUFFER_AMOUNT",
         "AUTO_BUY_UPLOAD_BONUS_THRESHOLD",
-        "AUTO_BUY_UPLOAD_BONUS_AMOUNT"
+        "AUTO_BUY_UPLOAD_BONUS_AMOUNT",
+        "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB",
+        "HARDCOVER_MATCH_THRESHOLD"
     ]:
         try:
             config[key] = float(config[key])
         except (ValueError, TypeError):
             config[key] = FALLBACK_CONFIG[key]
+
+    if (
+        not math.isfinite(config["AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"])
+        or config["AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"] < 0
+    ):
+        config["AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"] = FALLBACK_CONFIG["AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"]
 
     # Booleans
     for key in [
@@ -1111,20 +1236,25 @@ def load_config():
         "AUTO_ORGANIZE_USE_COPY",
         "HAPTICS_ENABLED",
         "ENABLE_DYNAMIC_IP_UPDATE",
+        "USE_MOUSEHOLE_MAM_COOKIE",
         "AUTO_BUY_VIP",
         "AUTO_BUY_UPLOAD_ON_RATIO",
         "AUTO_BUY_UPLOAD_ON_BUFFER",
         "AUTO_BUY_UPLOAD_ON_BONUS",
         "BLOCK_DOWNLOAD_ON_LOW_BUFFER",
         "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD",
+        "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED",
         "ENABLE_FILESYSTEM_THUMBNAIL_CACHE",
-        "RTORRENT_DIGEST_AUTH"
+        "RTORRENT_DIGEST_AUTH",
+        "HARDCOVER_ENRICHMENT_ENABLED"
     ]:
         config[key] = coerce_bool(config.get(key), FALLBACK_CONFIG[key])
         val = config[key]
         if not isinstance(val, bool):
             # Check against common string representations of True
             config[key] = str(val).lower() in ('true', '1', 't', 'yes', 'on')
+
+    config["MOUSEHOLE_API_URL"] = normalize_mousehole_api_url(config.get("MOUSEHOLE_API_URL"))
 
     config["RESULTS_DISPLAY_FIELDS"] = normalize_result_display_fields(
         config.get("RESULTS_DISPLAY_FIELDS"),
@@ -1269,6 +1399,226 @@ def calculate_vip_topup_weeks(user_data):
 
     weeks_to_cap = max(0.0, VIP_MAX_WEEKS - current_weeks)
     return min(weeks_affordable, weeks_to_cap)
+
+
+class SafeFormatDict(dict):
+    def __missing__(self, key):
+        return ""
+
+
+def _parse_auto_task_webhook_params(raw_value):
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return None
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = dict(parse_qsl(raw, keep_blank_values=True))
+
+    if isinstance(parsed, dict):
+        return parsed
+
+    app.logger.warning("[AUTO-WEBHOOK] AUTO_TASK_WEBHOOK_PARAMS must be a JSON object or query string; ignoring value")
+    return None
+
+
+def _parse_auto_task_webhook_body(raw_value):
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return None
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw_value
+
+
+def _parse_auto_task_webhook_events(raw_value):
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return None
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = [item.strip() for item in raw.split(",")]
+
+    if isinstance(parsed, str):
+        parsed = [parsed]
+
+    if isinstance(parsed, list):
+        events = {str(item).strip() for item in parsed if str(item).strip()}
+        return events or None
+
+    app.logger.warning("[AUTO-WEBHOOK] AUTO_TASK_WEBHOOK_EVENTS must be a JSON array or comma-separated list; ignoring value")
+    return None
+
+
+def _render_auto_task_webhook_template(value, context):
+    if isinstance(value, str):
+        return value.format_map(SafeFormatDict(context))
+    if isinstance(value, list):
+        return [_render_auto_task_webhook_template(item, context) for item in value]
+    if isinstance(value, dict):
+        return {key: _render_auto_task_webhook_template(val, context) for key, val in value.items()}
+    return value
+
+
+def _filter_none_values(payload):
+    if isinstance(payload, dict):
+        return {key: value for key, value in payload.items() if value is not None}
+    return payload
+
+
+def _normalize_webhook_query_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, separators=(",", ":"))
+    return str(value)
+
+
+def _build_auto_task_summary(context):
+    label_map = {
+        "task": "Task",
+        "reason": "Reason",
+        "amount": "Amount",
+        "purchase_size": "Purchase Size",
+        "purchase_count": "Purchase Count",
+        "threshold": "Threshold",
+        "current_ratio": "Current Ratio",
+        "current_buffer_gb": "Current Buffer GB",
+        "starting_seedbonus": "Starting Seedbonus",
+        "seedbonus": "Seedbonus",
+        "previous_ip": "Previous IP",
+        "detected_ip": "Detected IP",
+        "updated_ip": "Updated IP",
+        "title": "Title",
+        "author": "Author",
+        "hash": "Hash",
+        "mid": "MID",
+        "pending_count": "Pending",
+        "organized_count": "Organized",
+        "failed_count": "Failed",
+        "message": "Message",
+        "error": "Error",
+    }
+    ordered_keys = [
+        "task",
+        "reason",
+        "amount",
+        "purchase_size",
+        "purchase_count",
+        "threshold",
+        "current_ratio",
+        "current_buffer_gb",
+        "starting_seedbonus",
+        "seedbonus",
+        "previous_ip",
+        "detected_ip",
+        "updated_ip",
+        "title",
+        "author",
+        "hash",
+        "mid",
+        "pending_count",
+        "organized_count",
+        "failed_count",
+        "message",
+        "error",
+    ]
+
+    parts = []
+    for key in ordered_keys:
+        value = context.get(key)
+        if value in (None, ""):
+            continue
+        parts.append(f"{label_map[key]}={value}")
+    return ". ".join(parts)
+
+
+def _get_torrent_metadata_summary(hash_val):
+    torrent_meta = load_database().get(hash_val, {})
+    return {
+        "hash": hash_val,
+        "title": torrent_meta.get("title"),
+        "author": torrent_meta.get("author"),
+        "mid": torrent_meta.get("mid"),
+    }
+
+
+async def send_auto_task_webhook_notification(event, success, **details):
+    webhook_url = str(os.getenv("AUTO_TASK_WEBHOOK_URL") or "").strip()
+    if not webhook_url:
+        return
+
+    enabled_events = _parse_auto_task_webhook_events(os.getenv("AUTO_TASK_WEBHOOK_EVENTS"))
+    if enabled_events is not None and event not in enabled_events:
+        return
+
+    method = str(os.getenv("AUTO_TASK_WEBHOOK_METHOD", "POST") or "POST").strip().upper()
+    if method not in {"GET", "POST"}:
+        app.logger.warning(f"[AUTO-WEBHOOK] Unsupported AUTO_TASK_WEBHOOK_METHOD '{method}', falling back to POST")
+        method = "POST"
+
+    query_template = _parse_auto_task_webhook_params(os.getenv("AUTO_TASK_WEBHOOK_PARAMS"))
+    body_template = _parse_auto_task_webhook_body(os.getenv("AUTO_TASK_WEBHOOK_BODY"))
+    status = "success" if success else "failure"
+    context = _filter_none_values({
+        "event": event,
+        "task": details.get("task"),
+        "status": status,
+        "success": success,
+        "timestamp": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        **details,
+    })
+    context["summary"] = _build_auto_task_summary(context)
+
+    request_kwargs = {
+        "params": None,
+        "json": None,
+        "content": None,
+    }
+
+    if query_template is None:
+        if method == "GET":
+            request_kwargs["params"] = {
+                key: _normalize_webhook_query_value(value)
+                for key, value in context.items()
+            }
+    else:
+        rendered_params = _render_auto_task_webhook_template(query_template, context)
+        request_kwargs["params"] = {
+            str(key): _normalize_webhook_query_value(value)
+            for key, value in rendered_params.items()
+            if value is not None
+        }
+
+    if method == "POST":
+        if body_template is None:
+            request_kwargs["json"] = context
+        else:
+            rendered_body = _render_auto_task_webhook_template(body_template, context)
+            if isinstance(rendered_body, (dict, list, int, float, bool)) or rendered_body is None:
+                request_kwargs["json"] = rendered_body
+            else:
+                request_kwargs["content"] = str(rendered_body)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.request(
+                method,
+                webhook_url,
+                params=request_kwargs["params"],
+                json=request_kwargs["json"],
+                content=request_kwargs["content"],
+                timeout=10,
+            )
+            response.raise_for_status()
+        app.logger.info(f"[AUTO-WEBHOOK] Sent {event} {status} notification via {method}")
+    except Exception as e:
+        app.logger.warning(f"[AUTO-WEBHOOK] Failed to send {event} {status} notification: {e}")
     
 async def load_new_app_config():
     new_config = load_config()
@@ -1302,8 +1652,13 @@ async def load_new_app_config():
     ).resolve()
     REMOTE_TORRENT_DOWNLOAD_PATH = new_config.get("REMOTE_TORRENT_DOWNLOAD_PATH") or None
     
-    global mam_session_cookies
-    mam_session_cookies = {"mam_id": app.config.get("MAM_ID")}
+    global mam_session_cookies, mousehole_last_mam_cookie, mousehole_last_host_ip
+    mam_session_cookies = {"mam_id": normalize_mam_cookie_value(app.config.get("MAM_ID"))}
+    mousehole_last_mam_cookie = ""
+    mousehole_last_host_ip = ""
+    if uses_mousehole_mam_cookie():
+        mam_session_cookies = {}
+        await refresh_mam_cookie_from_mousehole(force=True)
     
     # --- CRITICAL FIX HERE ---
     global torrent_client 
@@ -1528,13 +1883,28 @@ async def monitor_downloads_loop():
 
                 if app.config.get("AUTO_ORGANIZE_ON_ADD"):
                     try:
+                        org_details = _get_torrent_metadata_summary(h)
                         success, msg = await _perform_organization(h)
                         if success:
                             app.logger.info(f"[MONITOR] Auto-organize succeeded for {h}: {msg}")
                         else:
                             app.logger.warning(f"[MONITOR] Auto-organize failed for {h}: {msg}")
+                        await send_auto_task_webhook_notification(
+                            "auto_organize_on_download",
+                            success,
+                            task="organize_on_download",
+                            message=msg,
+                            **org_details,
+                        )
                     except Exception as e:
                         app.logger.error(f"[MONITOR] Exception during auto-organize for {h}: {e}", exc_info=True)
+                        await send_auto_task_webhook_notification(
+                            "auto_organize_on_download",
+                            False,
+                            task="organize_on_download",
+                            error=str(e),
+                            **_get_torrent_metadata_summary(h),
+                        )
                 if h in monitoring_state:
                     del monitoring_state[h]
                 
@@ -1595,11 +1965,25 @@ def save_ip_state(ip):
     with open(IP_STATE_FILE, "w") as f:
         json.dump({"last_ip": ip}, f, indent=4)
 
-async def force_update_ip():
+async def force_update_ip(notify_event=False, previous_ip=None, detected_ip=None):
     async with app.app_context():
         app.logger.info("Forcing manual IP update for dynamic seedbox.")
-        if not app.config.get("MAM_ID"): return
-        api_cookies = {"mam_id": app.config.get("MAM_ID")}
+        if uses_mousehole_mam_cookie():
+            app.logger.info("Skipping MouseSearch IP update because Mousehole cookie mode is enabled.")
+            return
+
+        if not await ensure_mam_session_cookie():
+            if notify_event:
+                await send_auto_task_webhook_notification(
+                    "auto_update_ip",
+                    False,
+                    task="dynamic_ip_update",
+                    error="MAM cookie is not configured",
+                    previous_ip=previous_ip,
+                    detected_ip=detected_ip,
+                )
+            return
+        api_cookies = dict(mam_session_cookies)
         try:
             update_url = "https://t.myanonamouse.net/json/dynamicSeedbox.php"
             async with httpx.AsyncClient() as client:
@@ -1608,13 +1992,51 @@ async def force_update_ip():
                 update_data = update_response.json()
                 if new_ip := update_data.get("ip"):
                     save_ip_state(new_ip)
+                    if notify_event:
+                        await send_auto_task_webhook_notification(
+                            "auto_update_ip",
+                            True,
+                            task="dynamic_ip_update",
+                            previous_ip=previous_ip,
+                            detected_ip=detected_ip,
+                            updated_ip=new_ip,
+                        )
+                elif notify_event:
+                    await send_auto_task_webhook_notification(
+                        "auto_update_ip",
+                        False,
+                        task="dynamic_ip_update",
+                        previous_ip=previous_ip,
+                        detected_ip=detected_ip,
+                        error="Update endpoint did not return an IP address",
+                    )
         except Exception as e:
             app.logger.error(f"Error calling dynamic seedbox update: {e}")
+            if notify_event:
+                await send_auto_task_webhook_notification(
+                    "auto_update_ip",
+                    False,
+                    task="dynamic_ip_update",
+                    previous_ip=previous_ip,
+                    detected_ip=detected_ip,
+                    error=str(e),
+                )
 
 async def check_and_update_ip():
     async with app.app_context():
-        if not app.config.get("MAM_ID"): return
-        api_cookies = {"mam_id": app.config.get("MAM_ID")}
+        if uses_mousehole_mam_cookie():
+            app.logger.info("Skipping MouseSearch IP check because Mousehole cookie mode is enabled.")
+            return
+
+        if not await ensure_mam_session_cookie():
+            await send_auto_task_webhook_notification(
+                "auto_update_ip",
+                False,
+                task="dynamic_ip_update",
+                error="MAM cookie is not configured",
+            )
+            return
+        api_cookies = dict(mam_session_cookies)
         try:
             ip_check_url = f"{app.config.get('MAM_API_URL')}/json/jsonIp.php"
             async with httpx.AsyncClient() as client:
@@ -1622,29 +2044,53 @@ async def check_and_update_ip():
                 response.raise_for_status()
                 current_ip = response.json().get("ip")
                 if not current_ip: return
-        except Exception:
+        except Exception as e:
+            await send_auto_task_webhook_notification(
+                "auto_update_ip",
+                False,
+                task="dynamic_ip_update",
+                error=f"Could not fetch current IP: {e}",
+            )
             return
             
         last_ip = load_ip_state()
         if current_ip != last_ip:
-            await force_update_ip()
+            await force_update_ip(notify_event=True, previous_ip=last_ip, detected_ip=current_ip)
 
 
 # --- VIP AUTO-BUY SCHEDULER ---
 async def auto_buy_vip():
     """Automatically purchase VIP credit to keep it topped up."""
     async with app.app_context():
-        if not app.config.get("MAM_ID"):
-            app.logger.warning("VIP auto-buy scheduled but MAM_ID not configured")
+        if not await ensure_mam_session_cookie():
+            app.logger.warning("VIP auto-buy scheduled but MAM cookie not configured")
+            await send_auto_task_webhook_notification(
+                "auto_buy_vip",
+                False,
+                task="vip_topup",
+                error="MAM cookie is not configured",
+            )
             return
         
         if not await login_mam():
             app.logger.warning("VIP auto-buy failed: Could not log into MAM")
+            await send_auto_task_webhook_notification(
+                "auto_buy_vip",
+                False,
+                task="vip_topup",
+                error="Could not log into MAM",
+            )
             return
 
         user_data = await fetch_mam_json_load()
         if not user_data:
             app.logger.warning("[AUTO-VIP] Could not fetch user data")
+            await send_auto_task_webhook_notification(
+                "auto_buy_vip",
+                False,
+                task="vip_topup",
+                error="Could not fetch user data",
+            )
             return
         max_weeks = calculate_vip_topup_weeks(user_data)
         if max_weeks < VIP_MIN_WEEKS:
@@ -1674,10 +2120,35 @@ async def auto_buy_vip():
                         'amount': result.get('amount'),
                         'seedbonus': result.get('seedbonus')
                     })
+                    await send_auto_task_webhook_notification(
+                        "auto_buy_vip",
+                        True,
+                        task="vip_topup",
+                        amount=result.get('amount'),
+                        seedbonus=result.get('seedbonus'),
+                    )
                 else:
                     app.logger.warning(f"[AUTO-VIP] Purchase failed: {result}")
+                    await send_auto_task_webhook_notification(
+                        "auto_buy_vip",
+                        False,
+                        task="vip_topup",
+                        amount=result.get('amount'),
+                        seedbonus=result.get('seedbonus'),
+                        error=normalize_spaces(
+                            result.get('error')
+                            or result.get('message')
+                            or json.dumps(result, ensure_ascii=True)
+                        ),
+                    )
         except Exception as e:
             app.logger.error(f"[AUTO-VIP] Error during scheduled VIP purchase: {e}")
+            await send_auto_task_webhook_notification(
+                "auto_buy_vip",
+                False,
+                task="vip_topup",
+                error=str(e),
+            )
 
 
 
@@ -1685,7 +2156,8 @@ async def auto_buy_vip():
 async def check_and_buy_upload():
     """Check ratio, buffer, and bonus thresholds, auto-purchase upload credit if needed."""
     async with app.app_context():
-        if not app.config.get("MAM_ID"):
+        if not await ensure_mam_session_cookie():
+            app.logger.warning("[AUTO-UPLOAD] MAM cookie not configured")
             return
         
         if not await login_mam():
@@ -1708,8 +2180,15 @@ async def check_and_buy_upload():
         async def purchase_upload(amount, reason):
             _, chunks = build_upload_chunks(amount)
             if not chunks:
-                app.logger.warning(f"[AUTO-UPLOAD-{reason.upper()}] Invalid amount: {amount} GB (multiples of {UPLOAD_CREDIT_MIN_GB} only)")
-                return False, None
+                error = f"Invalid amount: {amount} GB (multiples of {UPLOAD_CREDIT_MIN_GB} only)"
+                app.logger.warning(f"[AUTO-UPLOAD-{reason.upper()}] {error}")
+                return {
+                    "success": False,
+                    "amount": 0,
+                    "seedbonus": None,
+                    "error": error,
+                    "reason": reason,
+                }
 
             total_purchased = 0
             final_seedbonus = None
@@ -1738,15 +2217,39 @@ async def check_and_buy_upload():
 
                             final_seedbonus = result.get('seedbonus')
                         else:
+                            error = normalize_spaces(
+                                result.get('error')
+                                or result.get('message')
+                                or json.dumps(result, ensure_ascii=True)
+                            )
                             app.logger.warning(f"[AUTO-UPLOAD-{reason.upper()}] Purchase failed: {result}")
-                            return False, None
+                            return {
+                                "success": False,
+                                "amount": total_purchased,
+                                "seedbonus": final_seedbonus,
+                                "error": error,
+                                "reason": reason,
+                            }
                     except Exception as e:
                         app.logger.error(f"[AUTO-UPLOAD-{reason.upper()}] Error: {e}")
-                        return False, None
+                        return {
+                            "success": False,
+                            "amount": total_purchased,
+                            "seedbonus": final_seedbonus,
+                            "error": str(e),
+                            "reason": reason,
+                        }
 
             if total_purchased <= 0:
-                app.logger.warning(f"[AUTO-UPLOAD-{reason.upper()}] Purchase failed: no upload credit added")
-                return False, None
+                error = "Purchase failed: no upload credit added"
+                app.logger.warning(f"[AUTO-UPLOAD-{reason.upper()}] {error}")
+                return {
+                    "success": False,
+                    "amount": 0,
+                    "seedbonus": final_seedbonus,
+                    "error": error,
+                    "reason": reason,
+                }
 
             app.logger.info(f"[AUTO-UPLOAD-{reason.upper()}] Purchase successful - {total_purchased} GB added")
             await broadcast_payload({
@@ -1756,7 +2259,13 @@ async def check_and_buy_upload():
                 'reason': reason,
                 'seedbonus': final_seedbonus
             })
-            return True, final_seedbonus
+            return {
+                "success": True,
+                "amount": total_purchased,
+                "seedbonus": final_seedbonus,
+                "error": None,
+                "reason": reason,
+            }
         
         # Check ratio threshold
         if ratio_check_enabled:
@@ -1765,11 +2274,23 @@ async def check_and_buy_upload():
                 amount = float(app.config.get("AUTO_BUY_UPLOAD_RATIO_AMOUNT", 50))
                 app.logger.info(f"[AUTO-UPLOAD] Ratio {stats['ratio']} below threshold {ratio_threshold}, purchasing {amount} GB")
                 
-                success, seedbonus = await purchase_upload(amount, "ratio")
-                if success:
+                purchase_result = await purchase_upload(amount, "ratio")
+                await send_auto_task_webhook_notification(
+                    "auto_buy_upload_ratio",
+                    purchase_result["success"],
+                    task="upload_credit_ratio",
+                    reason="ratio",
+                    threshold=ratio_threshold,
+                    current_ratio=stats.get("ratio"),
+                    purchase_size=amount,
+                    amount=round(float(purchase_result.get("amount") or 0), 2),
+                    seedbonus=purchase_result.get("seedbonus"),
+                    error=purchase_result.get("error"),
+                )
+                if purchase_result["success"]:
                     purchased = True
-                    if seedbonus is not None:
-                        current_seedbonus = seedbonus
+                    if purchase_result["seedbonus"] is not None:
+                        current_seedbonus = purchase_result["seedbonus"]
         
         # Check buffer threshold (only if we didn't already purchase)
         if buffer_check_enabled and not purchased:
@@ -1778,9 +2299,21 @@ async def check_and_buy_upload():
                 amount = float(app.config.get("AUTO_BUY_UPLOAD_BUFFER_AMOUNT", 50))
                 app.logger.info(f"[AUTO-UPLOAD] Buffer {stats['buffer_gb']:.2f} GB below threshold {buffer_threshold} GB, purchasing {amount} GB")
                 
-                success, seedbonus = await purchase_upload(amount, "buffer")
-                if success and seedbonus is not None:
-                    current_seedbonus = seedbonus
+                purchase_result = await purchase_upload(amount, "buffer")
+                await send_auto_task_webhook_notification(
+                    "auto_buy_upload_buffer",
+                    purchase_result["success"],
+                    task="upload_credit_buffer",
+                    reason="buffer",
+                    threshold=buffer_threshold,
+                    current_buffer_gb=stats.get("buffer_gb"),
+                    purchase_size=amount,
+                    amount=round(float(purchase_result.get("amount") or 0), 2),
+                    seedbonus=purchase_result.get("seedbonus"),
+                    error=purchase_result.get("error"),
+                )
+                if purchase_result["success"] and purchase_result["seedbonus"] is not None:
+                    current_seedbonus = purchase_result["seedbonus"]
 
         if bonus_check_enabled:
             bonus_threshold = float(app.config.get("AUTO_BUY_UPLOAD_BONUS_THRESHOLD", 5000))
@@ -1789,30 +2322,154 @@ async def check_and_buy_upload():
             if seedbonus is None:
                 refreshed = await get_user_stats()
                 if not refreshed:
-                    app.logger.warning("[AUTO-UPLOAD-BONUS] Could not refresh user stats before bonus check")
+                    error = "Could not refresh user stats before bonus check"
+                    app.logger.warning(f"[AUTO-UPLOAD-BONUS] {error}")
+                    await send_auto_task_webhook_notification(
+                        "auto_buy_upload_bonus",
+                        False,
+                        task="upload_credit_bonus",
+                        reason="bonus",
+                        threshold=bonus_threshold,
+                        purchase_size=amount,
+                        error=error,
+                    )
                     return
                 seedbonus = refreshed.get('seedbonus')
 
+            starting_seedbonus = seedbonus
+            purchase_count = 0
+            total_purchased = 0.0
+            failure_error = None
+
             while seedbonus is not None and seedbonus >= bonus_threshold:
                 app.logger.info(f"[AUTO-UPLOAD] Bonus points {seedbonus} >= threshold {bonus_threshold}, purchasing {amount} GB")
-                success, new_seedbonus = await purchase_upload(amount, "bonus")
-                if not success:
+                purchase_result = await purchase_upload(amount, "bonus")
+                if not purchase_result["success"]:
+                    failure_error = purchase_result.get("error") or "Purchase failed"
                     break
+                purchase_count += 1
+                total_purchased += float(purchase_result.get("amount") or 0)
+                new_seedbonus = purchase_result.get("seedbonus")
                 if new_seedbonus is None:
                     refreshed = await get_user_stats()
                     if not refreshed:
-                        app.logger.warning("[AUTO-UPLOAD-BONUS] Could not refresh user stats after purchase")
+                        failure_error = "Could not refresh user stats after purchase"
+                        app.logger.warning(f"[AUTO-UPLOAD-BONUS] {failure_error}")
                         break
                     new_seedbonus = refreshed.get('seedbonus')
                 if new_seedbonus is None:
+                    failure_error = "Could not determine remaining bonus points after purchase"
+                    app.logger.warning(f"[AUTO-UPLOAD-BONUS] {failure_error}")
                     break
                 if new_seedbonus >= seedbonus:
-                    app.logger.warning("[AUTO-UPLOAD-BONUS] Bonus points did not decrease after purchase; stopping loop")
+                    failure_error = "Bonus points did not decrease after purchase; stopping loop"
+                    app.logger.warning(f"[AUTO-UPLOAD-BONUS] {failure_error}")
                     break
                 seedbonus = new_seedbonus
 
+            if purchase_count > 0 or failure_error:
+                await send_auto_task_webhook_notification(
+                    "auto_buy_upload_bonus",
+                    failure_error is None and purchase_count > 0,
+                    task="upload_credit_bonus",
+                    reason="bonus",
+                    threshold=bonus_threshold,
+                    purchase_size=amount,
+                    purchase_count=purchase_count,
+                    amount=round(total_purchased, 2),
+                    starting_seedbonus=starting_seedbonus,
+                    seedbonus=seedbonus,
+                    error=failure_error,
+                )
+
 
 # --- SESSION AND API HELPERS ---
+def uses_mousehole_mam_cookie() -> bool:
+    return bool(app.config.get("USE_MOUSEHOLE_MAM_COOKIE"))
+
+
+def get_mousehole_api_url(override_url=None) -> str:
+    value = override_url if override_url is not None else app.config.get("MOUSEHOLE_API_URL")
+    return normalize_mousehole_api_url(value)
+
+
+async def refresh_mam_cookie_from_mousehole(
+    force: bool = False,
+    base_url_override=None,
+    allow_cached_on_error: bool = True,
+) -> bool:
+    global mousehole_cookie_last_refresh, mousehole_cookie_last_error, mousehole_last_mam_cookie, mousehole_last_host_ip
+
+    base_url = get_mousehole_api_url(base_url_override)
+    if not base_url:
+        mousehole_cookie_last_error = "Mousehole API URL is not configured."
+        mam_session_cookies.pop("mam_id", None)
+        mousehole_last_mam_cookie = ""
+        mousehole_last_host_ip = ""
+        return False
+
+    now = time.monotonic()
+    if (
+        not force
+        and base_url_override is None
+        and mam_session_cookies.get("mam_id")
+        and now - mousehole_cookie_last_refresh < MOUSEHOLE_COOKIE_REFRESH_SECONDS
+    ):
+        return True
+
+    async with mam_session_cookie_lock:
+        now = time.monotonic()
+        if (
+            not force
+            and base_url_override is None
+            and mam_session_cookies.get("mam_id")
+            and now - mousehole_cookie_last_refresh < MOUSEHOLE_COOKIE_REFRESH_SECONDS
+        ):
+            return True
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{base_url}/state", timeout=5)
+                response.raise_for_status()
+                state = response.json()
+
+            current_cookie = normalize_mam_cookie_value(state.get("currentCookie"))
+            mousehole_last_host_ip = str((state.get("host") or {}).get("ip") or "").strip()
+            mousehole_cookie_last_refresh = time.monotonic()
+            if current_cookie:
+                mam_session_cookies["mam_id"] = current_cookie
+                mousehole_last_mam_cookie = current_cookie
+                mousehole_cookie_last_error = None
+                return True
+
+            mam_session_cookies.pop("mam_id", None)
+            mousehole_last_mam_cookie = ""
+            mousehole_last_host_ip = ""
+            mousehole_cookie_last_error = "Mousehole does not have a MAM cookie configured."
+            app.logger.warning("[MOUSEHOLE] /state did not return currentCookie")
+            return False
+        except Exception as exc:
+            mousehole_cookie_last_error = f"Could not fetch Mousehole MAM cookie: {exc}"
+            app.logger.warning(f"[MOUSEHOLE] Failed to fetch /state: {exc}")
+            return allow_cached_on_error and bool(mam_session_cookies.get("mam_id"))
+
+
+async def ensure_mam_session_cookie(force_mousehole_refresh: bool = False) -> bool:
+    if uses_mousehole_mam_cookie():
+        return await refresh_mam_cookie_from_mousehole(force=force_mousehole_refresh)
+
+    if not mam_session_cookies.get("mam_id") and app.config.get("MAM_ID"):
+        mam_session_cookies["mam_id"] = normalize_mam_cookie_value(app.config.get("MAM_ID"))
+    return bool(mam_session_cookies.get("mam_id"))
+
+
+def format_cookie_for_display(cookie_value: str | None) -> str:
+    value = str(cookie_value or "").strip()
+    if not value:
+        return "Not synced"
+    return value
+
+
 def update_cookies(response):
     global mam_session_cookies
     if "set-cookie" in response.headers:
@@ -1940,7 +2597,7 @@ async def mam_autosuggest():
         return autosuggest_response([])
 
     # 2. Prepare MAM Request
-    if not mam_session_cookies.get("mam_id"):
+    if not await ensure_mam_session_cookie():
         return autosuggest_response([])
 
     url = f"{app.config['MAM_API_URL']}/tor/js/loadSearchJSONbasic.php"
@@ -2209,6 +2866,43 @@ async def mam_status():
     }), status_code
 
 @app.route('/api/v1/mam/user_data', methods=['GET'])
+
+@app.route('/mam/sync_mousehole_cookie', methods=['POST'])
+async def sync_mousehole_cookie():
+    payload = await request.get_json(silent=True) or {}
+    form_enabled = coerce_bool(payload.get("use_mousehole_mam_cookie"), False)
+    mousehole_api_url = payload.get("mousehole_api_url")
+
+    if not uses_mousehole_mam_cookie() and not form_enabled:
+        return jsonify({
+            'status': 'error',
+            'message': 'Mousehole cookie mode is not enabled.',
+            'cookie': format_cookie_for_display(mousehole_last_mam_cookie),
+            'mousehole_ip': mousehole_last_host_ip,
+        }), 400
+
+    synced = await refresh_mam_cookie_from_mousehole(
+        force=True,
+        base_url_override=mousehole_api_url,
+        allow_cached_on_error=False,
+    )
+    cookie = mousehole_last_mam_cookie
+    if synced and cookie:
+        return jsonify({
+            'status': 'success',
+            'message': 'Mousehole cookie synced.',
+            'cookie': format_cookie_for_display(cookie),
+            'mousehole_ip': mousehole_last_host_ip,
+        })
+
+    return jsonify({
+        'status': 'error',
+        'message': mousehole_cookie_last_error or 'Mousehole cookie sync failed.',
+        'cookie': format_cookie_for_display(cookie),
+        'mousehole_ip': mousehole_last_host_ip,
+    }), 502
+
+
 @app.route('/mam/user_data', methods=['GET'])
 async def mam_user_data():
     result = await fetch_mam_json_load_result()
@@ -2505,6 +3199,7 @@ async def fetch_mam_json_load_result():
     """
     url = app.config.get("MAM_API_URL")
     sanitized_url = sanitize_mam_api_url(url)
+    await ensure_mam_session_cookie()
     mam_id_present = bool(mam_session_cookies.get("mam_id"))
 
     if not url:
@@ -2513,7 +3208,10 @@ async def fetch_mam_json_load_result():
         return {"data": None, "message": message, "status_code": 500}
 
     if not mam_id_present:
-        message = "MAM session ID is not configured."
+        if uses_mousehole_mam_cookie():
+            message = mousehole_cookie_last_error or "Mousehole MAM cookie is not configured."
+        else:
+            message = "MAM session ID is not configured."
         app.logger.warning("[MAM-API] %s url=%s mam_id_present=%s", message, sanitized_url, mam_id_present)
         return {"data": None, "message": message, "status_code": 401}
 
@@ -2610,24 +3308,8 @@ async def get_user_stats():
                 app.logger.warning(f"Could not parse stat '{val}', defaulting to 0.0")
                 return 0.0
 
-        # Parse uploaded and downloaded (format: "1,234.45 GiB")
-        def parse_size(size_str):
-            if not size_str: return 0.0
-            parts = size_str.split()
-            if len(parts) != 2: return 0.0
-            
-            # Use safe_float here to handle commas in "1,234.56"
-            value = safe_float(parts[0])
-            unit = parts[1].upper()
-            
-            if 'TIB' in unit or 'TB' in unit: return value * 1024
-            elif 'GIB' in unit or 'GB' in unit: return value
-            elif 'MIB' in unit or 'MB' in unit: return value / 1024
-            elif 'KIB' in unit or 'KB' in unit: return value / (1024 * 1024)
-            return value
-        
-        uploaded_gb = parse_size(data.get('uploaded', '0 GiB'))
-        downloaded_gb = parse_size(data.get('downloaded', '0 GiB'))
+        uploaded_gb = parse_size_to_gb(data.get('uploaded', '0 GiB'))
+        downloaded_gb = parse_size_to_gb(data.get('downloaded', '0 GiB'))
         
         # Now safe to use safe_float on these fields too
         ratio = safe_float(data.get('ratio', 0))
@@ -2651,6 +3333,8 @@ async def fetch_torrent_file_from_mam(torrent_url: str) -> tuple[bytes | None, s
     """
     if not torrent_url:
         return None, None
+
+    await ensure_mam_session_cookie()
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
@@ -2762,10 +3446,17 @@ async def client_add_torrent():
         is_public_freeleech = int(incoming_data.get('free', 0) or 0) == 1
     except (ValueError, TypeError):
         is_public_freeleech = False
+    is_personal_freeleech = False
+    try:
+        is_personal_freeleech = int(incoming_data.get('personal_freeleech', 0) or 0) == 1
+    except (ValueError, TypeError):
+        is_personal_freeleech = False
 
     if app.config.get("AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD", False):
         if is_public_freeleech:
             app.logger.info("[DOWNLOAD] Auto Freeleech wedge purchase skipped: torrent is already public freeleech.")
+        elif is_personal_freeleech:
+            app.logger.info("[DOWNLOAD] Auto Freeleech wedge purchase skipped: torrent already has personal freeleech.")
         else:
             torrent_id_for_fl = None
             try:
@@ -2775,52 +3466,49 @@ async def client_add_torrent():
                 torrent_id_for_fl = None
 
             if torrent_id_for_fl is not None:
-                try:
-                    if await login_mam():
-                        fl_result = await purchase_personal_fl_wedge(torrent_id_for_fl)
-                        if fl_result.get('success'):
-                            app.logger.info(f"[DOWNLOAD] Auto-purchased Freeleech wedge for torrent {torrent_id_for_fl}")
+                min_size_enabled = app.config.get("AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED", False)
+                min_size_mb = app.config.get("AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB", 0)
+                torrent_size_gb = parse_size_to_gb(torrent_size_str, default=None)
+                should_purchase_fl = True
+
+                if min_size_enabled:
+                    if torrent_size_gb is None:
+                        should_purchase_fl = False
+                        app.logger.info(
+                            f"[DOWNLOAD] Auto Freeleech wedge purchase skipped for torrent {torrent_id_for_fl}; "
+                            f"could not parse torrent size '{torrent_size_str}' for threshold check."
+                        )
+                    elif torrent_size_gb * 1024 <= min_size_mb:
+                        should_purchase_fl = False
+                        app.logger.info(
+                            f"[DOWNLOAD] Auto Freeleech wedge purchase skipped for torrent {torrent_id_for_fl}; "
+                            f"size {torrent_size_gb * 1024:.2f} MB is not greater than threshold {min_size_mb:.2f} MB."
+                        )
+
+                if should_purchase_fl:
+                    try:
+                        if await login_mam():
+                            fl_result = await purchase_personal_fl_wedge(torrent_id_for_fl)
+                            if fl_result.get('success'):
+                                app.logger.info(f"[DOWNLOAD] Auto-purchased Freeleech wedge for torrent {torrent_id_for_fl}")
+                            else:
+                                app.logger.warning(
+                                    f"[DOWNLOAD] Auto Freeleech wedge purchase failed for torrent {torrent_id_for_fl}; continuing download. Result={fl_result}"
+                                )
                         else:
                             app.logger.warning(
-                                f"[DOWNLOAD] Auto Freeleech wedge purchase failed for torrent {torrent_id_for_fl}; continuing download. Result={fl_result}"
+                                f"[DOWNLOAD] Auto Freeleech wedge purchase skipped for torrent {torrent_id_for_fl}; not logged into MAM. Continuing download."
                             )
-                    else:
+                    except Exception as e:
                         app.logger.warning(
-                            f"[DOWNLOAD] Auto Freeleech wedge purchase skipped for torrent {torrent_id_for_fl}; not logged into MAM. Continuing download."
+                            f"[DOWNLOAD] Auto Freeleech wedge purchase errored for torrent {torrent_id_for_fl}; continuing download. Error={e}"
                         )
-                except Exception as e:
-                    app.logger.warning(
-                        f"[DOWNLOAD] Auto Freeleech wedge purchase errored for torrent {torrent_id_for_fl}; continuing download. Error={e}"
-                    )
     
     # Check if download should be blocked due to low buffer
     if app.config.get("BLOCK_DOWNLOAD_ON_LOW_BUFFER", True) and await login_mam():
         stats = await get_user_stats()
         if stats:
-            # Parse torrent size
-            def parse_size(size_str):
-                if not size_str:
-                    return 0.0
-                parts = size_str.split()
-                if len(parts) != 2:
-                    return 0.0
-                try:
-                    value = float(parts[0])
-                except:
-                    return 0.0
-                unit = parts[1].upper()
-                # Convert to GB
-                if 'TIB' in unit or 'TB' in unit:
-                    return value * 1024
-                elif 'GIB' in unit or 'GB' in unit:
-                    return value
-                elif 'MIB' in unit or 'MB' in unit:
-                    return value / 1024
-                elif 'KIB' in unit or 'KB' in unit:
-                    return value / (1024 * 1024)
-                return value
-            
-            torrent_size_gb = parse_size(torrent_size_str)
+            torrent_size_gb = parse_size_to_gb(torrent_size_str)
             buffer_gb = stats['buffer_gb']
             
             if torrent_size_gb > buffer_gb:
@@ -3208,6 +3896,539 @@ def get_nonempty_request_list(args, name):
     return [v for v in args.getlist(name) if v]
 
 
+def hardcover_enrichment_is_active() -> bool:
+    token = str(app.config.get("HARDCOVER_API_TOKEN") or "").strip()
+    return bool(app.config.get("HARDCOVER_ENRICHMENT_ENABLED", True) and token)
+
+
+def create_hardcover_client() -> HardcoverClient | None:
+    global HARDCOVER_CLIENT
+    if not hardcover_enrichment_is_active():
+        return None
+
+    token = str(app.config.get("HARDCOVER_API_TOKEN") or "").strip()
+    endpoint = str(app.config.get("HARDCOVER_API_URL") or FALLBACK_CONFIG["HARDCOVER_API_URL"]).strip()
+    user_agent = str(app.config.get("HARDCOVER_USER_AGENT") or FALLBACK_CONFIG["HARDCOVER_USER_AGENT"]).strip()
+    rate_limit = int(app.config.get("HARDCOVER_RATE_LIMIT", FALLBACK_CONFIG["HARDCOVER_RATE_LIMIT"]))
+    if HARDCOVER_CLIENT is None:
+        HARDCOVER_CLIENT = HardcoverClient(
+            token,
+            endpoint=endpoint,
+            user_agent=user_agent,
+            timeout_seconds=30.0,
+            rate_limit=rate_limit,
+        )
+    return HARDCOVER_CLIENT
+
+
+async def preload_hardcover_user_book_cache() -> None:
+    global HARDCOVER_USER_BOOK_PRELOAD_ACTIVE
+
+    client = create_hardcover_client()
+    if client is None or not client.user_id or HARDCOVER_USER_BOOK_PRELOAD_ACTIVE:
+        return
+
+    HARDCOVER_USER_BOOK_PRELOAD_ACTIVE = True
+    try:
+        await client.user_book_map()
+    except Exception as exc:
+        app.logger.warning(f"[HARDCOVER] User book cache preload failed: {exc}")
+    finally:
+        HARDCOVER_USER_BOOK_PRELOAD_ACTIVE = False
+
+
+def get_cached_hardcover_series_response(series_id: int) -> dict | None:
+    entry = hardcover_series_response_cache.get(int(series_id))
+    if not isinstance(entry, dict):
+        return None
+
+    fetched_at = float(entry.get("fetched_at") or 0)
+    if (time.time() - fetched_at) > HARDCOVER_SERIES_CACHE_TTL_SECONDS:
+        hardcover_series_response_cache.pop(int(series_id), None)
+        return None
+
+    payload = entry.get("payload")
+    return copy.deepcopy(payload) if isinstance(payload, dict) else None
+
+
+def set_cached_hardcover_series_response(series_id: int, payload: dict) -> None:
+    hardcover_series_response_cache[int(series_id)] = {
+        "fetched_at": time.time(),
+        "payload": copy.deepcopy(payload),
+    }
+
+
+def serialize_hardcover_user_book(user_book: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(user_book, dict):
+        return None
+
+    try:
+        user_book_id = int(user_book.get("id"))
+        status_id = int(user_book.get("status_id"))
+    except (TypeError, ValueError):
+        return None
+    if user_book_id <= 0 or status_id <= 0:
+        return None
+
+    def positive_int(value):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number >= 0 else None
+
+    def non_negative_float(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number >= 0 else None
+
+    status_obj = user_book.get("user_book_status") or {}
+    status_label = str(status_obj.get("status") or "").strip() if isinstance(status_obj, dict) else ""
+    return {
+        "id": user_book_id,
+        "book_id": positive_int(user_book.get("book_id")),
+        "edition_id": positive_int(user_book.get("edition_id")),
+        "user_id": positive_int(user_book.get("user_id")),
+        "status_id": status_id,
+        "status": status_label,
+        "privacy_setting_id": positive_int(user_book.get("privacy_setting_id")) or 1,
+        "rating": non_negative_float(user_book.get("rating")),
+        "updated_at": str(user_book.get("updated_at") or "").strip(),
+    }
+
+
+def prune_hardcover_enrichment_batches() -> None:
+    cutoff = time.time() - HARDCOVER_ENRICHMENT_BATCH_TTL_SECONDS
+    expired = [
+        search_id for search_id, batch in hardcover_enrichment_batches.items()
+        if float(batch.get("updated_at") or batch.get("created_at") or 0) < cutoff
+    ]
+    for search_id in expired:
+        hardcover_enrichment_batches.pop(search_id, None)
+
+
+def initialize_hardcover_enrichment_batch(search_id: str, results: list[dict]) -> None:
+    prune_hardcover_enrichment_batches()
+    now = time.time()
+    source_results: dict[str, dict[str, Any]] = {}
+    for index, result in enumerate(results):
+        torrent_id = str(result.get("id") or "")
+        if not torrent_id:
+            continue
+        source_results[torrent_id] = {
+            "index": index,
+            "result": result,
+        }
+    hardcover_enrichment_batches[search_id] = {
+        "created_at": now,
+        "updated_at": now,
+        "completed": True,
+        "total": len(results),
+        "results": {},
+        "source_results": source_results,
+        "queued_torrent_ids": set(),
+        "shared_enrichments": {},
+    }
+
+
+def store_hardcover_enrichment_result(search_id: str, index: int, torrent_id: str, enrichment: dict) -> None:
+    batch = hardcover_enrichment_batches.get(search_id)
+    if batch is None:
+        initialize_hardcover_enrichment_batch(search_id, [])
+        batch = hardcover_enrichment_batches[search_id]
+
+    batch["updated_at"] = time.time()
+    queued_torrent_ids = batch.get("queued_torrent_ids")
+    if isinstance(queued_torrent_ids, set):
+        queued_torrent_ids.discard(torrent_id)
+    batch["results"][torrent_id] = {
+        "index": index,
+        "torrent_id": torrent_id,
+        "enrichment": enrichment,
+    }
+
+
+def queue_hardcover_enrichment_results(search_id: str, torrent_ids: list[Any]) -> list[dict[str, Any]]:
+    batch = hardcover_enrichment_batches.get(search_id)
+    if batch is None:
+        return []
+
+    source_results = batch.get("source_results") or {}
+    queued_torrent_ids = batch.setdefault("queued_torrent_ids", set())
+    results_by_torrent = batch.get("results") or {}
+    selected_entries: list[dict[str, Any]] = []
+    seen_torrent_ids: set[str] = set()
+
+    for raw_torrent_id in torrent_ids:
+        torrent_id = str(raw_torrent_id or "").strip()
+        if not torrent_id or torrent_id in seen_torrent_ids:
+            continue
+        seen_torrent_ids.add(torrent_id)
+        if torrent_id in queued_torrent_ids or torrent_id in results_by_torrent:
+            continue
+        entry = source_results.get(torrent_id)
+        if not isinstance(entry, dict):
+            continue
+        queued_torrent_ids.add(torrent_id)
+        selected_entries.append(entry)
+
+    batch["updated_at"] = time.time()
+    if selected_entries:
+        batch["completed"] = False
+    return sorted(selected_entries, key=lambda item: int(item.get("index", 0)))
+
+
+async def run_hardcover_enrichment_batch(search_id: str, results: list[dict]):
+    batch = hardcover_enrichment_batches.get(search_id)
+    if batch is None:
+        return
+
+    client = create_hardcover_client()
+    if client is None:
+        queued_torrent_ids = batch.get("queued_torrent_ids")
+        if isinstance(queued_torrent_ids, set):
+            for result in results:
+                queued_torrent_ids.discard(str(result.get("id") or ""))
+        batch["completed"] = not batch.get("queued_torrent_ids")
+        batch["updated_at"] = time.time()
+        return
+
+    threshold = float(app.config.get("HARDCOVER_MATCH_THRESHOLD", FALLBACK_CONFIG["HARDCOVER_MATCH_THRESHOLD"]))
+    concurrency = int(app.config.get("HARDCOVER_CONCURRENCY", FALLBACK_CONFIG["HARDCOVER_CONCURRENCY"]))
+    per_page = int(app.config.get("HARDCOVER_SEARCH_PER_PAGE", FALLBACK_CONFIG["HARDCOVER_SEARCH_PER_PAGE"]))
+    resolver = HardcoverResolver(
+        client,
+        HardcoverEnrichmentConfig(
+            match_threshold=threshold,
+            concurrency=concurrency,
+            per_page=per_page,
+        ),
+    )
+    runner = HardcoverBatchRunner(resolver, concurrency)
+    shared_enrichments = batch.setdefault("shared_enrichments", {})
+
+    async def publish(index: int, result: dict, enrichment: dict):
+        torrent_id = str(result.get("id") or "")
+        if not torrent_id:
+            return
+        store_hardcover_enrichment_result(search_id, index, torrent_id, enrichment)
+        payload = {
+            "event": "hardcover-enrichment",
+            "search_id": search_id,
+            "torrent_id": torrent_id,
+            "index": index,
+            "enrichment": enrichment,
+        }
+        await broadcast_payload(payload)
+
+    started = time.monotonic()
+    try:
+        await runner.run(results, publish, shared_cache=shared_enrichments)
+        batch = hardcover_enrichment_batches.get(search_id)
+        if batch is not None:
+            batch["completed"] = not batch.get("queued_torrent_ids")
+            batch["updated_at"] = time.time()
+        hardcover_rpm = await client.rate_controller.current_requests_per_minute()
+        app.logger.info(
+            f"[HARDCOVER] search_id={search_id} enriched={len(results)} "
+            f"duration_ms={(time.monotonic() - started) * 1000:.1f} "
+            f"rpm={hardcover_rpm}"
+        )
+    except Exception as e:
+        batch = hardcover_enrichment_batches.get(search_id)
+        if batch is not None:
+            queued_torrent_ids = batch.get("queued_torrent_ids")
+            if isinstance(queued_torrent_ids, set):
+                for result in results:
+                    queued_torrent_ids.discard(str(result.get("id") or ""))
+            batch["completed"] = not batch.get("queued_torrent_ids")
+            batch["updated_at"] = time.time()
+            batch["error"] = str(e)
+        app.logger.error(f"[HARDCOVER] Batch failed search_id={search_id}: {e}", exc_info=True)
+
+
+@app.route('/hardcover/enrichment/<search_id>', methods=['GET'])
+async def hardcover_enrichment_status(search_id):
+    prune_hardcover_enrichment_batches()
+    batch = hardcover_enrichment_batches.get(str(search_id or ""))
+    if not batch:
+        return jsonify({
+            "search_id": search_id,
+            "completed": False,
+            "total": 0,
+            "results": [],
+        })
+
+    results = sorted(
+        batch.get("results", {}).values(),
+        key=lambda item: int(item.get("index", 0)),
+    )
+    return jsonify({
+        "search_id": search_id,
+        "completed": bool(batch.get("completed")),
+        "total": int(batch.get("total") or 0),
+        "results": results,
+        "error": batch.get("error", ""),
+    })
+
+
+@app.route('/hardcover/enrichment/<search_id>/queue', methods=['POST'])
+async def hardcover_enrichment_queue(search_id):
+    prune_hardcover_enrichment_batches()
+    normalized_search_id = str(search_id or "")
+    batch = hardcover_enrichment_batches.get(normalized_search_id)
+    if not batch:
+        return jsonify({
+            "status": "error",
+            "message": "Hardcover enrichment batch not found.",
+            "search_id": normalized_search_id,
+        }), 404
+
+    data = await request.get_json(silent=True) or {}
+    torrent_ids = data.get("torrent_ids") or []
+    if not isinstance(torrent_ids, list):
+        return jsonify({
+            "status": "error",
+            "message": "torrent_ids must be an array.",
+            "search_id": normalized_search_id,
+        }), 400
+
+    queued_entries = queue_hardcover_enrichment_results(normalized_search_id, torrent_ids)
+    queued_results = [copy.deepcopy(entry.get("result") or {}) for entry in queued_entries if isinstance(entry.get("result"), dict)]
+    if queued_results:
+        app.add_background_task(
+            run_hardcover_enrichment_batch,
+            normalized_search_id,
+            queued_results,
+        )
+
+    return jsonify({
+        "status": "success",
+        "search_id": normalized_search_id,
+        "queued": len(queued_results),
+        "completed": bool(batch.get("completed")),
+    })
+
+
+@app.route('/hardcover/series/<int:series_id>', methods=['GET'])
+async def hardcover_series_details(series_id):
+    client = create_hardcover_client()
+    if client is None or int(series_id) <= 0:
+        return jsonify({"series": []})
+
+    cached_payload = get_cached_hardcover_series_response(series_id)
+    if cached_payload is not None:
+        return jsonify(cached_payload)
+
+    def extract_image_url(image):
+        if not image:
+            return ""
+        if isinstance(image, str):
+            return image
+        if isinstance(image, dict):
+            for key in ("url", "image_url", "large", "medium", "small", "original"):
+                value = image.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        return ""
+
+    def normalize_position(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        series = await client.series_details(series_id)
+        if not isinstance(series, dict):
+            return jsonify({"series": []})
+
+        entries = []
+        for entry in series.get("book_series") or []:
+            if not isinstance(entry, dict):
+                continue
+            book = entry.get("book") or {}
+            if not isinstance(book, dict):
+                continue
+            title = str(book.get("title") or "").strip()
+            slug = str(book.get("slug") or "").strip()
+            if not title or not slug:
+                continue
+            entries.append({
+                "position": normalize_position(entry.get("position")),
+                "book": {
+                    "id": book.get("id"),
+                    "slug": slug,
+                    "title": title,
+                    "release_year": book.get("release_year"),
+                    "image_url": extract_image_url(book.get("image")),
+                },
+            })
+
+        entries.sort(key=lambda item: (
+            item.get("position") is None,
+            item.get("position") if item.get("position") is not None else float("inf"),
+            str(item.get("book", {}).get("title") or "").lower(),
+        ))
+
+        payload = {
+            "series": [{
+                "id": series.get("id"),
+                "name": series.get("name") or "",
+                "slug": series.get("slug") or "",
+                "author": {
+                    "name": str((series.get("author") or {}).get("name") or "").strip(),
+                    "slug": str((series.get("author") or {}).get("slug") or "").strip(),
+                },
+                "books_count": int(series.get("books_count") or len(entries) or 0),
+                "book_series": entries,
+            }]
+        }
+        set_cached_hardcover_series_response(series_id, payload)
+        return jsonify(payload)
+    except Exception as exc:
+        app.logger.error(f"[HARDCOVER] Series fetch failed series_id={series_id}: {exc}", exc_info=True)
+        if cached_payload is not None:
+            return jsonify(cached_payload)
+        return jsonify({"series": [], "error": str(exc)}), 500
+
+
+@app.route('/hardcover/user-book/<int:book_id>', methods=['GET'])
+async def hardcover_get_user_book(book_id):
+    client = create_hardcover_client()
+    if client is None:
+        return jsonify({
+            "status": "error",
+            "message": "Hardcover integration is not configured.",
+        }), 503
+
+    if int(book_id) <= 0:
+        return jsonify({
+            "status": "error",
+            "message": "A valid Hardcover book_id is required.",
+        }), 400
+
+    try:
+        user_book = await client.user_book_for_book(book_id)
+    except Exception as exc:
+        app.logger.error(f"[HARDCOVER] User book lookup failed book_id={book_id}: {exc}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "message": f"Hardcover status lookup failed: {exc}",
+        }), 502
+
+    return jsonify({
+        "status": "success",
+        "book_id": int(book_id),
+        "user_book": serialize_hardcover_user_book(user_book),
+    })
+
+
+@app.route('/hardcover/user-book/status', methods=['POST'])
+async def hardcover_update_user_book_status():
+    client = create_hardcover_client()
+    if client is None:
+        return jsonify({
+            "status": "error",
+            "message": "Hardcover integration is not configured.",
+        }), 503
+
+    payload = await request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "").strip().lower()
+    try:
+        book_id = int(payload.get("book_id") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid Hardcover status request."}), 400
+
+    if book_id <= 0:
+        return jsonify({"status": "error", "message": "Missing Hardcover book ID."}), 400
+
+    status_id = None
+    if action != "remove":
+        try:
+            status_id = int(payload.get("status_id") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"status": "error", "message": "Invalid Hardcover status request."}), 400
+        if status_id not in {1, 2, 3, 5}:
+            return jsonify({"status": "error", "message": "Unsupported Hardcover status."}), 400
+
+    try:
+        current_user_book = await client.user_book_for_book(book_id)
+        serialized_current = serialize_hardcover_user_book(current_user_book)
+        if serialized_current is None:
+            if action == "remove":
+                return jsonify({
+                    "status": "error",
+                    "message": "This Hardcover title is not in your library yet, so there is no status to remove.",
+                }), 404
+
+            assert status_id is not None
+            created_user_book = await client.create_user_book(
+                book_id,
+                status_id=status_id,
+                privacy_setting_id=1,
+            )
+            serialized_created = serialize_hardcover_user_book(created_user_book)
+            if serialized_created is None:
+                return jsonify({
+                    "status": "error",
+                    "message": "Hardcover returned an invalid status create response.",
+                }), 502
+            return jsonify({
+                "status": "success",
+                "message": "Hardcover status added.",
+                "book_id": book_id,
+                "user_book": serialized_created,
+            })
+
+        if action == "remove":
+            await client.delete_user_book(serialized_current["id"])
+            return jsonify({
+                "status": "success",
+                "message": "Hardcover status removed.",
+                "book_id": book_id,
+                "user_book": None,
+            })
+
+        assert status_id is not None
+        if serialized_current["status_id"] == status_id:
+            return jsonify({
+                "status": "success",
+                "message": "Hardcover status is already set.",
+                "book_id": book_id,
+                "user_book": serialized_current,
+            })
+
+        updated_user_book = await client.update_user_book_status(
+            serialized_current["id"],
+            status_id,
+            edition_id=serialized_current.get("edition_id"),
+            privacy_setting_id=serialized_current.get("privacy_setting_id"),
+            rating=serialized_current.get("rating"),
+        )
+    except HardcoverAPIError as exc:
+        return jsonify({
+            "status": "error",
+            "message": f"Hardcover status update failed: {exc}",
+        }), 502
+
+    serialized_updated = serialize_hardcover_user_book(updated_user_book)
+    if serialized_updated is None:
+        return jsonify({
+            "status": "error",
+            "message": "Hardcover returned an invalid status update response.",
+        }), 502
+
+    return jsonify({
+        "status": "success",
+        "message": "Hardcover status updated.",
+        "book_id": book_id,
+        "user_book": serialized_updated,
+    })
+
+
 def search_checkbox_state(args, name, default_search_fields, has_search_param):
     val = args.get(name)
     if val is None:
@@ -3301,9 +4522,13 @@ def decorate_search_results(ranked_results, base_dl_url):
         if not item.get('thumbnail'):
             if item.get('id'):
                 item['thumbnail'] = f"https://cdn.myanonamouse.net/t/p/small/{item['id']}.webp"
+                item["has_mam_cover"] = True
             else:
                 cat = item.get('category', '')
                 item['thumbnail'] = f"https://static.myanonamouse.net/pic/cats/3/{cat}.png"
+                item["has_mam_cover"] = False
+        else:
+            item["has_mam_cover"] = True
 
         item['author_info'] = parse_mam_metadata(item.get('author_info', ''))
         item['narrator_info'] = parse_mam_metadata(item.get('narrator_info', ''))
@@ -3358,6 +4583,7 @@ async def execute_mam_search(args):
 
     query = str(args.get("query", "") or "").strip()
     search_started_at = time.monotonic()
+    search_id = uuid.uuid4().hex[:12]
     is_vip_active = await get_vip_active_status()
 
     search_field_names = [
@@ -3533,10 +4759,13 @@ async def execute_mam_search(args):
         f"[SEARCH] results={len(display_results)} query_len={len(query)} "
         f"scope={params.get('tor[searchIn]', 'torrents')} duration_ms={search_duration_ms:.1f}"
     )
+    if display_results and hardcover_enrichment_is_active():
+        initialize_hardcover_enrichment_batch(search_id, copy.deepcopy(display_results))
 
     return {
         "ok": True,
         "status_code": 200,
+        "search_id": search_id,
         "query": query,
         "results": display_results,
         "total_results": len(display_results),
@@ -3599,6 +4828,8 @@ async def mam_search():
     return await render_template(
         "partials/results.html",
         results=search_result["results"],
+        search_id=search_result.get("search_id"),
+        HARDCOVER_ENRICHMENT_ACTIVE=hardcover_enrichment_is_active(),
         CLIENT_STATUS="CONNECTED" if search_result["client"]["connected"] else "NOT CONNECTED",
         categories=search_result["client"]["categories"],
         TORRENT_CLIENT_CATEGORY=app.config.get("TORRENT_CLIENT_CATEGORY", ""),
@@ -3634,6 +4865,8 @@ async def index():
             pass
 
     language_choices = sorted(language_dict.items(), key=lambda item: item[0].lower())
+    if hardcover_enrichment_is_active():
+        app.add_background_task(preload_hardcover_user_book_cache)
 
     return await render_template(
         "index.html",
@@ -3644,6 +4877,8 @@ async def index():
         LANGUAGE_CHOICES=language_choices,
         LANGUAGE_MAP=language_dict,
         DEFAULT_LANGUAGE_ID=language_dict.get("English", 1),
+        MOUSEHOLE_LAST_MAM_COOKIE=format_cookie_for_display(mousehole_last_mam_cookie),
+        MOUSEHOLE_LAST_HOST_IP=mousehole_last_host_ip,
         **app.config
     )
     
@@ -3811,6 +5046,7 @@ async def proxy_thumbnail():
                 return response
             
     # --- Upstream Fetch with Manual Redirect Handling ---
+    await ensure_mam_session_cookie()
     fwd_headers = {h: request.headers.get(h) for h in ("If-None-Match", "If-Modified-Since", "Range") if request.headers.get(h)}
     
     async with FETCH_SEMAPHORE:
@@ -3955,7 +5191,22 @@ async def api_v1_info():
 async def update_settings():
     form = await request.form
     config_to_update = app.config.copy()
-    boolean_fields = {"AUTO_ORGANIZE_ON_ADD", "AUTO_ORGANIZE_ON_SCHEDULE", "AUTO_ORGANIZE_USE_COPY", "HAPTICS_ENABLED", "ENABLE_DYNAMIC_IP_UPDATE", "AUTO_BUY_VIP", "AUTO_BUY_UPLOAD_ON_RATIO", "AUTO_BUY_UPLOAD_ON_BUFFER", "AUTO_BUY_UPLOAD_ON_BONUS", "BLOCK_DOWNLOAD_ON_LOW_BUFFER", "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD"}
+    boolean_fields = {
+        "AUTO_ORGANIZE_ON_ADD",
+        "AUTO_ORGANIZE_ON_SCHEDULE",
+        "AUTO_ORGANIZE_USE_COPY",
+        "HAPTICS_ENABLED",
+        "HARDCOVER_ENRICHMENT_ENABLED",
+        "ENABLE_DYNAMIC_IP_UPDATE",
+        "USE_MOUSEHOLE_MAM_COOKIE",
+        "AUTO_BUY_VIP",
+        "AUTO_BUY_UPLOAD_ON_RATIO",
+        "AUTO_BUY_UPLOAD_ON_BUFFER",
+        "AUTO_BUY_UPLOAD_ON_BONUS",
+        "BLOCK_DOWNLOAD_ON_LOW_BUFFER",
+        "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD",
+        "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED",
+    }
     for key in FALLBACK_CONFIG.keys():
         if key in boolean_fields: config_to_update[key] = key in form
         elif key in form: config_to_update[key] = form[key]
@@ -4005,8 +5256,30 @@ async def update_settings():
     if form.get("TORRENT_CLIENT_PASSWORD"): config_to_update["TORRENT_CLIENT_PASSWORD"] = form.get("TORRENT_CLIENT_PASSWORD")
     save_config(config_to_update)
     await load_new_app_config()
-    if app.config.get("ENABLE_DYNAMIC_IP_UPDATE"):
-        scheduler.add_job(id='manual_ip_update_job', func=force_update_ip, trigger='date', run_date=datetime.now() + timedelta(seconds=2))
+    if app.config.get("ENABLE_DYNAMIC_IP_UPDATE") and not uses_mousehole_mam_cookie():
+        interval_hours = int(app.config.get("DYNAMIC_IP_UPDATE_INTERVAL_HOURS", 3))
+        misfire_grace_seconds = max(1, int(interval_hours * 3600 * 0.8))
+        scheduler.add_job(
+            check_and_update_ip,
+            'interval',
+            hours=interval_hours,
+            id='ip_check_job',
+            replace_existing=True,
+            misfire_grace_time=misfire_grace_seconds,
+        )
+        scheduler.add_job(
+            id='manual_ip_update_job',
+            func=force_update_ip,
+            trigger='date',
+            run_date=datetime.now() + timedelta(seconds=2),
+            replace_existing=True,
+        )
+    else:
+        for job_id in ('ip_check_job', 'initial_ip_check_job', 'manual_ip_update_job'):
+            try:
+                scheduler.remove_job(job_id)
+            except:
+                pass
     
     # Update VIP auto-buy scheduler based on new settings
     if app.config.get("AUTO_BUY_VIP"):
@@ -4055,7 +5328,9 @@ async def update_settings():
     return jsonify({
         "status": "success", 
         "message": "Settings updated!",
-        "client_display_name": display_name 
+        "client_display_name": display_name,
+        "mousehole_cookie": format_cookie_for_display(mousehole_last_mam_cookie),
+        "mousehole_ip": mousehole_last_host_ip,
     })
 
 @app.route("/update_result_display_fields", methods=["POST"])
@@ -4301,13 +5576,32 @@ async def check_for_unorganized_torrents():
         app.logger.info("Running safety net organization job.")
         metadata = load_database()
         pending = [h for h, m in metadata.items() if m.get('status') == 'pending']
+        succeeded = 0
+        failed = 0
+        last_error = None
         for h in pending:
             try:
                 success, msg = await _perform_organization(h)
-                if not success:
+                if success:
+                    succeeded += 1
+                else:
+                    failed += 1
+                    last_error = msg
                     app.logger.warning(f"[SAFETY NET] Organization failed for {h}: {msg}")
             except Exception as e:
+                failed += 1
+                last_error = str(e)
                 app.logger.error(f"[SAFETY NET] Exception during organization of {h}: {e}", exc_info=True)
+        if pending:
+            await send_auto_task_webhook_notification(
+                "auto_organize_on_schedule",
+                failed == 0 and succeeded > 0,
+                task="organize_on_schedule",
+                pending_count=len(pending),
+                organized_count=succeeded,
+                failed_count=failed,
+                error=last_error,
+            )
 
 
 if __name__ == "__main__":

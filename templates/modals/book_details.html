@@ -9,9 +9,11 @@
 
       <div class="modal-body p-0 overflow-y-auto custom-scrollbar">
 
-        <div class="book-hero-container position-relative overflow-hidden text-white">
-          <div class="book-hero-bg position-absolute top-0 start-0 w-100 h-100" id="detail-hero-bg"></div>
-          <div class="book-hero-overlay position-absolute top-0 start-0 w-100 h-100"></div>
+        <div class="book-hero-container position-relative text-white">
+          <div class="book-hero-visual position-absolute top-0 start-0 w-100 h-100">
+            <div class="book-hero-bg position-absolute top-0 start-0 w-100 h-100" id="detail-hero-bg"></div>
+            <div class="book-hero-overlay position-absolute top-0 start-0 w-100 h-100"></div>
+          </div>
 
           <div class="container position-relative pt-5" style="z-index: 2;">
             <div class="row">
@@ -35,7 +37,21 @@
                     id="detail-subtitle"></div>
 
                   <div class="mb-1"><strong>By:</strong> <span id="detail-authors">---</span></div>
-                  <div class="mb-3"><strong>Narrated by:</strong> <span id="detail-narrators">---</span></div>
+                  <div class="mb-2"><strong>Narrated by:</strong> <span id="detail-narrators">---</span></div>
+                  <div id="detail-hero-hc-info" class="d-none mb-3">
+                    <div id="detail-hero-hc-link" class="detail-hero-hc-card d-inline-flex flex-column gap-2">
+                      <a id="detail-hero-hc-link-main" class="detail-hero-hc-card__link d-inline-flex flex-column gap-1 text-decoration-none"
+                        href="#" target="_blank" rel="noopener noreferrer">
+                        <div class="d-flex align-items-center gap-1 opacity-75" style="font-size: 0.7rem;">
+                          <img src="/static/icons/hardcover.png" alt="" style="width: 0.8rem; height: 0.8rem; object-fit: contain;" loading="lazy">
+                          <span class="text-uppercase fw-semibold" style="letter-spacing: 0.05em;">Hardcover</span>
+                        </div>
+                        <div id="detail-hero-hc-rating" class="d-none"></div>
+                        <div id="detail-hero-hc-year" class="d-none opacity-75 hardcover-mobile-hide" style="font-size: 0.8rem;"></div>
+                      </a>
+                      <div id="detail-hero-hc-actions" class="detail-hero-hc-actions"></div>
+                    </div>
+                  </div>
                   <div id="full" class="badge-container justify-content-center justify-content-md-start gap-1"
                     style="text-shadow:none;">
                     <span id="badge-downloaded" class="badge bg-success d-none"
@@ -96,92 +112,170 @@
         </div>
 
         <div class="container py-5 pt-md-4 pb-md-5">
-          <div class="row">
-            <div class="col-12 col-lg-8 pe-lg-5">
-              <div class="card">
-                <div class="card-header">
-                  <h5 class="text-body-emphasis my-2">Description</h5>
+          <div class="row" id="detail-columns-row">
+            <div class="col-12 col-lg-8 pe-lg-5" id="detail-primary-column" data-detail-balance-column="primary">
+              <div id="detail-primary-column-content">
+                <div class="card">
+                  <div class="card-header">
+                    <h5 class="text-body-emphasis my-2">Description</h5>
+                  </div>
+                  <div class="card-body">
+                    <div id="detail-description" class="lead fs-6 text-body-secondary detail-description-expandable"
+                      style="line-height: 1.7;" aria-expanded="false" data-balance-expandable="true"
+                      data-collapsed-height="350"></div>
+                  </div>
                 </div>
-                <div class="card-body">
-                  <div id="detail-description" class="lead fs-6 text-body-secondary" style="line-height: 1.7;"></div>
-                </div>
-              </div>
 
-              <div class="mt-4" id="detail-tags-container">
-                <h5 class="mb-2 text-body-tertiary small text-uppercase">Tags</h5>
-                <div id="detail-tags" class="d-flex flex-wrap gap-2"></div>
+                <div class="mt-4" id="detail-tags-container">
+                  <h5 class="mb-2 text-body-tertiary small text-uppercase">Tags</h5>
+                  <div id="detail-tags" class="d-flex flex-wrap gap-2"></div>
+                </div>
               </div>
             </div>
 
-            <div class="col-12 col-lg-4 mt-5 mt-lg-0">
-              <div class="card mb-4">
-                <div class="card-header">
-                  <h5 class="my-2 text-body-emphasis">Book Details</h5>
+            <div class="col-12 col-lg-4 mt-5 mt-lg-0" id="detail-secondary-column" data-detail-balance-column="secondary">
+              <div id="detail-secondary-column-content">
+                <div class="card mb-4">
+                  <div class="card-header">
+                    <h5 class="my-2 text-body-emphasis">Book Details</h5>
+                  </div>
+                  <div class="card-body">
+                    <ul class="list-unstyled mb-0 d-grid gap-2 small">
+                      <li class="d-flex justify-content-between">
+                        <span class="text-body-secondary">Category:</span>
+                        <span class="fw-medium text-body-emphasis text-end" id="detail-category">---</span>
+                      </li>
+                      <li class="d-flex justify-content-between">
+                        <span class="text-body-secondary">Series:</span>
+                        <span class="fw-medium text-body-emphasis text-end" id="detail-series">---</span>
+                      </li>
+                      <li class="d-flex justify-content-between">
+                        <span class="text-body-secondary">Language:</span>
+                        <span class="fw-medium text-body-emphasis text-end" id="detail-language">---</span>
+                      </li>
+                      <li class="d-flex justify-content-between">
+                        <span class="text-body-secondary">File Type:</span>
+                        <span class="fw-medium text-body-emphasis text-end" id="detail-filetype">---</span>
+                      </li>
+                      <li class="d-flex justify-content-between">
+                        <span class="text-body-secondary">Size:</span>
+                        <span class="fw-medium text-body-emphasis text-end" id="detail-size">---</span>
+                      </li>
+                      <li class="d-flex justify-content-between">
+                        <span class="text-body-secondary">Added on:</span>
+                        <span class="fw-medium text-body-emphasis text-end" id="detail-added">---</span>
+                      </li>
+                      <hr class="text-secondary opacity-25">
+                      <li class="d-flex justify-content-between">
+                        <span class="text-body-secondary">Seeders:</span>
+                        <span class="fw-bold text-success text-end" id="detail-seeders">0</span>
+                      </li>
+                      <li class="d-flex justify-content-between">
+                        <span class="text-body-secondary">Leechers:</span>
+                        <span class="fw-bold text-danger text-end" id="detail-leechers">0</span>
+                      </li>
+                    </ul>
+                  </div>
                 </div>
-                <div class="card-body">
-                  <ul class="list-unstyled mb-0 d-grid gap-2 small">
-                    <li class="d-flex justify-content-between">
-                      <span class="text-body-secondary">Category:</span>
-                      <span class="fw-medium text-body-emphasis text-end" id="detail-category">---</span>
-                    </li>
-                    <li class="d-flex justify-content-between">
-                      <span class="text-body-secondary">Series:</span>
-                      <span class="fw-medium text-body-emphasis text-end" id="detail-series">---</span>
-                    </li>
-                    <li class="d-flex justify-content-between">
-                      <span class="text-body-secondary">Language:</span>
-                      <span class="fw-medium text-body-emphasis text-end" id="detail-language">---</span>
-                    </li>
-                    <li class="d-flex justify-content-between">
-                      <span class="text-body-secondary">File Type:</span>
-                      <span class="fw-medium text-body-emphasis text-end" id="detail-filetype">---</span>
-                    </li>
-                    <li class="d-flex justify-content-between">
-                      <span class="text-body-secondary">Size:</span>
-                      <span class="fw-medium text-body-emphasis text-end" id="detail-size">---</span>
-                    </li>
-                    <li class="d-flex justify-content-between">
-                      <span class="text-body-secondary">Added on:</span>
-                      <span class="fw-medium text-body-emphasis text-end" id="detail-added">---</span>
-                    </li>
-                    <hr class="text-secondary opacity-25">
-                    <li class="d-flex justify-content-between">
-                      <span class="text-body-secondary">Seeders:</span>
-                      <span class="fw-bold text-success text-end" id="detail-seeders">0</span>
-                    </li>
-                    <li class="d-flex justify-content-between">
-                      <span class="text-body-secondary">Leechers:</span>
-                      <span class="fw-bold text-danger text-end" id="detail-leechers">0</span>
-                    </li>
-                  </ul>
+
+                <div class="card mb-4" id="detail-hardcover-card" style="display: none;">
+                  <div class="card-header d-flex align-items-center gap-2">
+                    <img src="/static/icons/hardcover.png" alt="" style="width: 1rem; height: 1rem; object-fit: contain;" loading="lazy">
+                    <h5 class="my-2 text-body-emphasis">Hardcover</h5>
+                  </div>
+                  <div class="card-body">
+                    <ul class="list-unstyled mb-0 d-grid gap-2 small">
+                      <li class="d-flex justify-content-between align-items-start" id="detail-hc-title-row">
+                        <span class="text-body-secondary" id="detail-hc-title-label">Title:</span>
+                        <span class="fw-medium text-body-emphasis text-end text-break ms-3" id="detail-hc-title"></span>
+                      </li>
+                      <li class="d-flex justify-content-between align-items-start" id="detail-hc-authors-row">
+                        <span class="text-body-secondary">Author:</span>
+                        <span class="fw-medium text-body-emphasis text-end text-break ms-3" id="detail-hc-authors"></span>
+                      </li>
+                      <li class="d-flex justify-content-between align-items-center" id="detail-hc-rating-row">
+                        <span class="text-body-secondary">Rating:</span>
+                        <span id="detail-hc-rating" class="fw-medium text-end"></span>
+                      </li>
+                      <li class="d-flex justify-content-between hardcover-mobile-hide" id="detail-hc-year-row">
+                        <span class="text-body-secondary">Published:</span>
+                        <span class="fw-medium text-body-emphasis text-end" id="detail-hc-year"></span>
+                      </li>
+                      <li class="d-flex justify-content-between" id="detail-hc-pages-row" style="display: none;">
+                        <span class="text-body-secondary">Pages:</span>
+                        <span class="fw-medium text-body-emphasis text-end" id="detail-hc-pages"></span>
+                      </li>
+                      <li class="d-flex justify-content-between" id="detail-hc-readers-row" style="display: none;">
+                        <span class="text-body-secondary">Readers:</span>
+                        <span class="fw-medium text-body-emphasis text-end" id="detail-hc-readers"></span>
+                      </li>
+                      <li class="d-flex justify-content-between align-items-start" id="detail-hc-series-row" style="display: none;">
+                        <span class="text-body-secondary" id="detail-hc-series-label">Series:</span>
+                        <span class="fw-medium text-body-emphasis text-end text-break ms-3" id="detail-hc-series"></span>
+                      </li>
+                    </ul>
+                    <div class="mt-3 d-none" id="detail-hc-subtitle-block">
+                      <div class="text-body-secondary small mb-1">Subtitle</div>
+                      <div class="fw-medium text-body-emphasis small" id="detail-hc-subtitle"></div>
+                    </div>
+                    <div class="mt-3 d-none" id="detail-hc-description-block">
+                      <div class="text-body-secondary small mb-1">Description</div>
+                      <div class="hardcover-description" id="detail-hc-description" role="button" tabindex="0"
+                        aria-expanded="false" title="Click to expand" data-balance-expandable="true"
+                        data-collapsed-height="96"></div>
+                    </div>
+                    <div class="mt-3 d-none" id="detail-hc-genres-block">
+                      <div class="text-body-secondary small mb-1">Genres</div>
+                      <div class="d-flex flex-wrap gap-1" id="detail-hc-genres"></div>
+                    </div>
+                    <div class="mt-3 d-none" id="detail-hc-moods-block">
+                      <div class="text-body-secondary small mb-1">Moods</div>
+                      <div class="d-flex flex-wrap gap-1" id="detail-hc-moods"></div>
+                    </div>
+                    <div class="mt-2" id="detail-hc-link-container"></div>
+                  </div>
                 </div>
-              </div>
 
-              <div class="rounded-3 bg-body-tertiary border border-opacity-10 border-secondary mb-4 overflow-hidden">
+                <div class="rounded-3 bg-body-tertiary border border-opacity-10 border-secondary mb-4 overflow-hidden">
 
-                <div class="card" data-bs-toggle="collapse" data-bs-target="#mediaInfoCollapse" aria-expanded="false"
-                  aria-controls="mediaInfoCollapse" style="cursor: pointer;">
+                  <div class="card" data-bs-toggle="collapse" data-bs-target="#mediaInfoCollapse" aria-expanded="false"
+                    aria-controls="mediaInfoCollapse" style="cursor: pointer;">
 
-                  <div class="card-header noBottomBorder p-3 d-flex justify-content-between collapsed">
-                    <h5 class="mb-0 text-body-emphasis">Media Info</h5>
-              
-                    <i class="bi bi-chevron-down text-secondary transition-transform"></i>
+                    <div class="card-header noBottomBorder p-3 d-flex justify-content-between collapsed">
+                      <h5 class="mb-0 text-body-emphasis">Media Info</h5>
+
+                      <i class="bi bi-chevron-down text-secondary transition-transform"></i>
+                    </div>
+
+
                   </div>
 
-                  
-                </div>
-
-                <div class="card-body collapse" id="mediaInfoCollapse">
-                  <div class="p-4">
-                    <div id="mediainfo-tree-container" class="border rounded-2 p-3 bg-body bg-opacity-50 overflow-auto"
-                      style="max-height: 400px;">
+                  <div class="card-body collapse" id="mediaInfoCollapse">
+                    <div class="p-4">
+                      <div id="mediainfo-tree-container" class="border rounded-2 p-3 bg-body bg-opacity-50 overflow-auto"
+                        style="max-height: 400px;">
+                      </div>
                     </div>
                   </div>
+
                 </div>
-
               </div>
+            </div>
+          </div>
 
-
+          <div class="row mt-4 d-none" id="detail-hc-series-strip-section">
+            <div class="col-12">
+              <div class="card">
+                <div class="card-header">
+                  <div class="d-flex flex-column gap-1">
+                    <h5 class="mb-0 text-body-emphasis">Series</h5>
+                    <div class="small text-body-secondary" id="detail-hc-series-strip-meta"></div>
+                  </div>
+                </div>
+                <div class="card-body">
+                  <div class="hardcover-series-strip" id="detail-hc-series-strip"></div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
