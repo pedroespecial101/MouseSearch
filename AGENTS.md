@@ -13,6 +13,10 @@ This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get sta
 - Prefer bind mounts for:
   - app state under `/opt/appdata/mousesearch/data`
   - downloads/library paths under a single shared mount if auto-organize or hardlink mode is enabled
+- The live unRAID Grimmory handoff for `MAM-QBTorrent` is documented in [docs/grimmory-bookdrop-handoff.md](/Users/petetreadaway/Projects/MouseSearch/docs/grimmory-bookdrop-handoff.md).
+- For that handoff, qBittorrent's completion hook only writes request files; host-side scripts do the hardlinking. Do not try to hardlink from `/downloads` to `/bookdrop` inside the qBittorrent container, because those are separate Docker bind mounts and can fail with `Cross-device link`.
+- The one-minute catchall reconciler is intentional and should stay enabled alongside the immediate request watcher.
+- MouseSearch runs on OCI, but live `MAM-QBTorrent` announces from unRAID. Do not enable the OCI-side Dynamic IP Updater for that client; use `/mnt/user/appdata/MAM-QBTorrent/scripts/update_mam_dynamic_seedbox.sh` on unRAID so MAM follows qBittorrent's egress IP/ASN.
 - If deploying publicly, pause and confirm the exposure plan first. This host already runs several services, and tailnet-only access is often preferred.
 - Before claiming a deployment is done, verify with `docker compose logs`, `docker ps`, and a real HTTP check against the chosen endpoint.
 

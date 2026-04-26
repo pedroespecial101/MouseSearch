@@ -50,6 +50,7 @@ MouseSearch can be deployed in two ways:
 For the OCI A1 host workflow used in this repo, see the deployment bundle in `deploy/oci/`.
 For automation usage details, see [docs/api-mcp-usage.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-usage.md).
 For rollout validation, see [docs/api-mcp-test-plan.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-test-plan.md).
+For the live unRAID MAM-QBTorrent to Grimmory BookDrop handoff, see [docs/grimmory-bookdrop-handoff.md](/Users/petetreadaway/Projects/MouseSearch/docs/grimmory-bookdrop-handoff.md).
 
 ---
 
@@ -384,6 +385,18 @@ You can control two separate aspects of auto-organization:
 4.  For each unorganized torrent, MouseSearch talks with your torrent client to figure out where the torrent files currently are, then hardlinks (or copies) them to your `organized` directory.
 
 > **Note:** currently MouseSearch only organizes torrents that have been downloaded using MouseSearch **after** this feature has been enabled. May in the future make this more flexible.
+
+### Grimmory BookDrop Handoff
+
+The live unRAID `MAM-QBTorrent` deployment uses a separate BookDrop handoff for Grimmory. It is adjacent to MouseSearch's auto-organization feature, but it is not the same mechanism:
+
+- qBittorrent's finished-torrent hook writes a request file for speed.
+- A host watcher hardlinks the completed torrent into Grimmory's BookDrop root.
+- A one-minute host reconciler catches missed hooks and restart races.
+
+Do not perform the hardlink inside the qBittorrent container. `/downloads` and `/bookdrop` are separate Docker bind mounts there, and hardlinking can fail even when the underlying host paths are on the same filesystem. Full operational notes live in [docs/grimmory-bookdrop-handoff.md](/Users/petetreadaway/Projects/MouseSearch/docs/grimmory-bookdrop-handoff.md).
+
+The live MouseSearch app runs on OCI, while `MAM-QBTorrent` announces from unRAID. Do not enable MouseSearch's Dynamic IP Updater for this qBittorrent client unless MouseSearch and qBittorrent share the same public egress IP. unRAID uses `/mnt/user/appdata/MAM-QBTorrent/scripts/update_mam_dynamic_seedbox.sh` instead so MAM's Dynamic Seedbox IP follows the torrent client, not the web app.
 
 ### Critical Setup Requirement
 
