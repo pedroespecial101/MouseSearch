@@ -11,6 +11,7 @@ Related docs:
 
 - API and MCP usage: [docs/api-mcp-usage.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-usage.md)
 - API and MCP rollout tests: [docs/api-mcp-test-plan.md](/Users/petetreadaway/Projects/MouseSearch/docs/api-mcp-test-plan.md)
+- Bounded OCI qBittorrent working-set plan: [docs/mam-qbittorrent-oci-plan.md](/Users/petetreadaway/Projects/MouseSearch/docs/mam-qbittorrent-oci-plan.md)
 
 ## Files
 
