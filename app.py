@@ -3679,7 +3679,7 @@ async def client_kindle_add_torrent():
     author = incoming_data.get('author', '')
     download_link = incoming_data.get('download_link') or incoming_data.get('torrent_url') or ''
 
-    samplefetch_url = app.config.get('SAMPLEFETCH_BASE_URL', 'https://samplefetch.bearded-pomano.ts.net/api/v1')
+    samplefetch_url = app.config.get('SAMPLEFETCH_BASE_URL', 'http://ts-samplefetch:8000/api/v1')
     endpoint = f"{samplefetch_url.rstrip('/')}/requests/direct"
 
     payload = {
@@ -3699,7 +3699,7 @@ async def client_kindle_add_torrent():
                 app.logger.warning("[KINDLE_ADD] SampleFetch direct request failed: HTTP %s - %s", resp.status_code, resp.text)
                 return jsonify({'error': f'SampleFetch error: HTTP {resp.status_code}'}), resp.status_code
     except Exception as exc:
-        app.logger.error("[KINDLE_ADD] Could not connect to SampleFetch orchestrator: %s", exc)
+        app.logger.error("[KINDLE_ADD] Could not connect to SampleFetch orchestrator: %s", exc, exc_info=True)
         return jsonify({'error': f'Could not reach SampleFetch: {exc}'}), 500
 
 
