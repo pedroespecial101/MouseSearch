@@ -3656,6 +3656,53 @@ async def client_add_torrent():
     else:
         return jsonify({'error': result.get('message', 'Unknown error')}), 400
 
+
+@app.route('/api/v1/client/kindle_add', methods=['POST'])
+@app.route('/client/kindle_add', methods=['POST'])
+async def client_kindle_add_torrent():
+    """
+    Forwards a 'Download to Kindle' request to the SampleFetch orchestrator (OCI).
+    SampleFetch handles adding the torrent to qBittorrent, staging the file, and
+    delivering to the Kindle's documents folder via SFTP (queueing and retrying automatically).
+    """
+    incoming_data = await request.get_json(silent=True) or {}
+    mam_id_raw = incoming_data.get('id') or incoming_data.get('mam_id') or 0
+    try:
+        mam_id = int(mam_id_raw)
+    except (ValueError, TypeError):
+        mam_id = 0
+
+    if not mam_id:
+        return jsonify({'error': 'Missing or invalid MAM ID'}), 400
+
+    title = incoming_data.get('title', 'Unknown')
+    author = incoming_data.get('author', '')
+    download_link = incoming_data.get('download_link') or incoming_data.get('torrent_url') or ''
+
+    samplefetch_url = app.config.get('SAMPLEFETCH_BASE_URL', 'https://samplefetch.bearded-pomano.ts.net/api/v1')
+    endpoint = f"{samplefetch_url.rstrip('/')}/requests/direct"
+
+    payload = {
+        'mam_id': mam_id,
+        'title': title,
+        'author': author,
+        'download_link': download_link,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as http_client:
+            resp = await http_client.post(endpoint, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                return jsonify({'status': 'queued', 'message': 'Queued for Kindle delivery', 'request': data.get('request')})
+            else:
+                app.logger.warning("[KINDLE_ADD] SampleFetch direct request failed: HTTP %s - %s", resp.status_code, resp.text)
+                return jsonify({'error': f'SampleFetch error: HTTP {resp.status_code}'}), resp.status_code
+    except Exception as exc:
+        app.logger.error("[KINDLE_ADD] Could not connect to SampleFetch orchestrator: %s", exc)
+        return jsonify({'error': f'Could not reach SampleFetch: {exc}'}), 500
+
+
 @app.route('/api/v1/client/resolve_mid', methods=['POST'])
 @app.route('/client/resolve_mid', methods=['POST'])
 async def client_resolve_mid():

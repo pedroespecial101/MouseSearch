@@ -220,6 +220,12 @@
                     <i class="bi bi-cloud-arrow-down-fill me-1"></i> Download
                 </button>
 
+                <button type="button" class="btn btn-warning btn-sm w-100 shadow-sm fw-semibold send-to-kindle-button"
+                    data-torrent-url="{{ result.download_link | safe }}" data-author="{{ result.author_info }}"
+                    data-title="{{ result.title }}" data-id="{{ result.id }}" data-size="{{ result.size }}">
+                    <i class="bi bi-tablet-fill me-1"></i> Download to Kindle
+                </button>
+
                 <div class="form-floating mt-1">
                     {% set category_ns = namespace(selected=default_client_category) %}
                     {% for rule in type_specific_torrent_categories if rule.default_main_cat == (result.main_cat | string) and rule.default_torrent_category %}

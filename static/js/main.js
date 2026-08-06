@@ -6142,6 +6142,18 @@ document.addEventListener("DOMContentLoaded", async function () {
                 return;
             }
 
+            // CASE B.5: Clicked the "Download to Kindle" button
+            const kindleBtn = event.target.closest('.send-to-kindle-button');
+            if (kindleBtn) {
+                event.preventDefault();
+                event.stopPropagation(); // Prevent opening the details modal
+                triggerHaptic('download');
+
+                const resultItem = kindleBtn.closest('.result-item');
+                initiateKindleDownloadFlow(kindleBtn, resultItem);
+                return;
+            }
+
             // CASE C: Clicked a Dropdown or Link (e.g., Author link)
             // We want default browser behavior, NOT opening the details modal
             if (event.target.closest('select') || event.target.closest('a') || event.target.closest('[data-hardcover-status-picker]')) {
@@ -6289,6 +6301,48 @@ document.addEventListener("DOMContentLoaded", async function () {
             // --- Direct Download (No Confirm Modal) ---
             performDownload(downloadData, button);
         }
+    }
+
+    /**
+     * Handles 'Download to Kindle' click flow.
+     * Passes the request to SampleFetch's direct queue endpoint.
+     */
+    function initiateKindleDownloadFlow(button, resultItem) {
+        if (!button) return;
+        const data = {
+            id: button.dataset.id,
+            title: button.dataset.title,
+            author: button.dataset.author,
+            download_link: button.dataset.torrentUrl
+        };
+
+        const origHtml = button.innerHTML;
+        button.disabled = true;
+        button.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Queueing...';
+
+        fetch('/api/v1/client/kindle_add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        })
+        .then(res => res.json().then(d => ({ status: res.status, body: d })))
+        .then(({ status, body }) => {
+            if (status === 200 && (body.status === 'queued' || body.ok)) {
+                showToast('Queued for Kindle delivery (SFTP + BookDrop)', 'success');
+                button.innerHTML = '<i class="bi bi-check-circle-fill me-1"></i> Queued for Kindle';
+                button.classList.remove('btn-warning', 'btn-info');
+                button.classList.add('btn-secondary');
+            } else {
+                showToast('Kindle Queue Error: ' + (body.error || 'Failed'), 'danger');
+                button.disabled = false;
+                button.innerHTML = origHtml;
+            }
+        })
+        .catch(err => {
+            showToast('Error sending to Kindle: ' + err, 'danger');
+            button.disabled = false;
+            button.innerHTML = origHtml;
+        });
     }
 
     // ============================================================
@@ -6513,6 +6567,7 @@ document.addEventListener("DOMContentLoaded", async function () {
 
         const dlBtn = document.getElementById('detail-download-btn');
         const quickAddBtn = document.getElementById('detail-quick-add-btn');
+        const sendToKindleBtn = document.getElementById('detail-send-to-kindle-btn');
 
         // Reset button state in case a previous book download changed it (e.g. "Added!" + disabled)
         if (dlBtn) {
@@ -6522,6 +6577,12 @@ document.addEventListener("DOMContentLoaded", async function () {
         if (quickAddBtn) {
             quickAddBtn.disabled = false;
             quickAddBtn.innerHTML = '<i class="bi bi-lightning-charge-fill me-1"></i> Quick Add';
+        }
+        if (sendToKindleBtn) {
+            sendToKindleBtn.disabled = false;
+            sendToKindleBtn.innerHTML = '<i class="bi bi-tablet-fill me-1"></i> Download to Kindle';
+            sendToKindleBtn.classList.remove('btn-secondary');
+            sendToKindleBtn.classList.add('btn-info');
         }
 
         dlBtn.dataset.torrentUrl = data.download_link;
@@ -6534,6 +6595,14 @@ document.addEventListener("DOMContentLoaded", async function () {
         dlBtn.dataset.free = data.free;
         dlBtn.dataset.personalFreeleech = data.personal_freeleech;
         dlBtn.dataset.flVip = data.fl_vip;
+
+        if (sendToKindleBtn) {
+            sendToKindleBtn.dataset.torrentUrl = data.download_link;
+            sendToKindleBtn.dataset.id = data.id;
+            sendToKindleBtn.dataset.author = authors;
+            sendToKindleBtn.dataset.title = data.title;
+            sendToKindleBtn.dataset.size = data.size;
+        }
 
         if (quickAddBtn) {
             quickAddBtn.dataset.torrentUrl = data.download_link;
