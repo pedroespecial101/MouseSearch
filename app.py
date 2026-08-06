@@ -3679,7 +3679,7 @@ async def client_kindle_add_torrent():
     author = incoming_data.get('author', '')
     download_link = incoming_data.get('download_link') or incoming_data.get('torrent_url') or ''
 
-    samplefetch_url = app.config.get('SAMPLEFETCH_BASE_URL', 'https://samplefetch.bearded-pomano.ts.net/api/v1')
+    samplefetch_url = app.config.get('SAMPLEFETCH_BASE_URL', 'http://100.87.83.30:8000/api/v1')
     endpoint = f"{samplefetch_url.rstrip('/')}/requests/direct"
 
     payload = {
