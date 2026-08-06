@@ -3679,7 +3679,7 @@ async def client_kindle_add_torrent():
     author = incoming_data.get('author', '')
     download_link = incoming_data.get('download_link') or incoming_data.get('torrent_url') or ''
 
-    samplefetch_url = app.config.get('SAMPLEFETCH_BASE_URL', 'http://100.87.83.30:8000/api/v1')
+    samplefetch_url = app.config.get('SAMPLEFETCH_BASE_URL', 'https://samplefetch.bearded-pomano.ts.net/api/v1')
     endpoint = f"{samplefetch_url.rstrip('/')}/requests/direct"
 
     payload = {
@@ -3690,7 +3690,7 @@ async def client_kindle_add_torrent():
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as http_client:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, verify=False) as http_client:
             resp = await http_client.post(endpoint, json=payload)
             if resp.status_code == 200:
                 data = resp.json()
